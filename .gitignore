@@ -1,0 +1,78 @@
+# ── Secrets & Credentials ───────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+*.key
+*.pem
+secrets/
+
+# ── Python Virtual Environments & Packages ─────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# ── Testing, Linting & Coverage ────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ── macOS & OS Artifacts ───────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+desktop.ini
+
+# ── Editors & IDEs ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs & Temporary Files ─────────────────────────────────────────
+*.log
+tmp/
+scratch/
+
+# ── Audio & Media Outputs ──────────────────────────────────────────
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+
+# ── Local Models & Large Installers ────────────────────────────────
+*.dmg
+models/
+
+# ── Private Conversation Archives ──────────────────────────────────
+# Keeps folder structure via .gitkeep while keeping user transcripts private
+memory/conversations/*
+!memory/conversations/.gitkeep
+
+# ── Internal Notes, Personal Planning & Scratch Files ──────────────
+*.docx
+*.pdf
+hello.py
+test_gemini_connection.py
+IRIS_TARS_Project_Master_Notes.docx
+IRIS_X_TARS_Development_Roadmap.md
