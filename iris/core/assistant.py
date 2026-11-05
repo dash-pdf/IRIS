@@ -168,8 +168,10 @@ class IRISAssistant:
 
         self.archive.open_session()
         self.state_machine.reset()
-        self.capture.unmute()
-        self.capture.start(on_frame=self._on_audio_frame)
+        from iris.adapters.stt.console_stt import ConsoleSTT
+        if not isinstance(self.stt, ConsoleSTT):
+            self.capture.unmute()
+            self.capture.start(on_frame=self._on_audio_frame)
         logger.info(
             "IRIS assistant started (Model: %s, TTS: %s, STT: %s)",
             self.model.__class__.__name__,

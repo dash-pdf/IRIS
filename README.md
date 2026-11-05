@@ -137,10 +137,18 @@ ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 
 ## Running IRIS
 
-Start the assistant via the main CLI entrypoint:
+Start the assistant with a single command:
 
 ```bash
-python iris_voice.py
+./run.sh
+```
+
+*(Alternatively, `./iris.sh` or `python iris_voice.py`)*
+
+For interactive keyboard chat mode (no microphone required):
+
+```bash
+./run.sh --text
 ```
 
 ### Command-Line Options
