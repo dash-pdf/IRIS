@@ -82,6 +82,15 @@ class TestDeterministicTools:
         assert try_evaluate_calculation("hello iris how are you") is None
         assert try_evaluate_calculation("what is the weather today") is None
 
+    def test_calculation_overflow_and_bounds_protection(self) -> None:
+        overflow_reply = try_evaluate_calculation("what is 9 ** 99999?")
+        assert overflow_reply == "The calculation exceeds allowable numerical bounds."
+
+    def test_calculation_blocks_arbitrary_code_and_attributes(self) -> None:
+        assert try_evaluate_calculation("__import__('os').system('ls')") is None
+        assert try_evaluate_calculation("(1).__class__.__bases__") is None
+        assert try_evaluate_calculation("eval('1+1')") is None
+
     def test_datetime_queries(self) -> None:
         fixed_dt = datetime(2026, 11, 5, 14, 30)  # Thursday, 5 Nov 2026 2:30 PM
         time_reply = try_evaluate_datetime("what time is it?", now_dt=fixed_dt)
@@ -101,6 +110,19 @@ class TestDeterministicTools:
 
     def test_datetime_ignores_unrelated(self) -> None:
         assert try_evaluate_datetime("tell me a story about time") is None
+
+    def test_datetime_rejects_location_and_historical_qualifiers(self) -> None:
+        # Time with location should not be treated as local time
+        assert try_evaluate_datetime("what time is it in Tokyo?") is None
+        assert try_evaluate_datetime("what time is it in London?") is None
+        assert try_evaluate_datetime("what time is it at the station?") is None
+
+        # Events or historical queries should not be answered with current local date/time
+        assert try_evaluate_datetime("what is the date of Easter?") is None
+        assert try_evaluate_datetime("what is the date of the next eclipse?") is None
+        assert try_evaluate_datetime("what day of the week was Christmas in 1999?") is None
+        assert try_evaluate_datetime("what year was Python released?") is None
+        assert try_evaluate_datetime("what year did World War II end?") is None
 
     def test_memory_retrieval_with_session_archive(self, tmp_path: Path) -> None:
         archive_dir = tmp_path / "memory" / "conversations"

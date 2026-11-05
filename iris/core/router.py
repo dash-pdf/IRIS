@@ -84,8 +84,11 @@ _ALGEBRAIC_IDENTITIES: dict[str, str] = {
 }
 
 
-def _safe_eval_node(node: ast.AST) -> float | int:
+def _safe_eval_node(node: ast.AST, depth: int = 0) -> float | int:
     """Recursively evaluate an AST node restricting execution to safe math."""
+    if depth > 25:
+        raise ValueError("Expression exceeds maximum safe nesting depth")
+
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float)):
             return node.value
@@ -95,16 +98,19 @@ def _safe_eval_node(node: ast.AST) -> float | int:
         op_func = _ALLOWED_OPERATORS.get(type(node.op))
         if op_func is None:
             raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
-        return op_func(_safe_eval_node(node.operand))
+        return op_func(_safe_eval_node(node.operand, depth=depth + 1))
 
     if isinstance(node, ast.BinOp):
         op_func = _ALLOWED_OPERATORS.get(type(node.op))
         if op_func is None:
             raise ValueError(f"Unsupported binary operator: {type(node.op).__name__}")
-        left = _safe_eval_node(node.left)
-        right = _safe_eval_node(node.right)
+        left = _safe_eval_node(node.left, depth=depth + 1)
+        right = _safe_eval_node(node.right, depth=depth + 1)
         if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)) and right == 0:
             raise ZeroDivisionError("Division by zero")
+        if isinstance(node.op, ast.Pow):
+            if abs(left) > 1e6 or abs(right) > 1000:
+                raise OverflowError("Exponentiation exceeds safe calculation bounds")
         return op_func(left, right)
 
     if isinstance(node, ast.Call):
@@ -112,7 +118,7 @@ def _safe_eval_node(node: ast.AST) -> float | int:
             func_name = node.func.id.lower()
             func = _ALLOWED_FUNCTIONS.get(func_name)
             if callable(func):
-                args = [_safe_eval_node(arg) for arg in node.args]
+                args = [_safe_eval_node(arg, depth=depth + 1) for arg in node.args]
                 return func(*args)
         raise ValueError("Unauthorized or unknown function call")
 
@@ -199,6 +205,8 @@ def try_evaluate_calculation(query: str) -> str | None:
             return f"The answer is {res_display}."
         except ZeroDivisionError:
             return "Division by zero is undefined."
+        except OverflowError:
+            return "The calculation exceeds allowable numerical bounds."
         except Exception:
             pass
 
@@ -241,10 +249,21 @@ _YEAR_MONTH_PATTERNS = [
 def try_evaluate_datetime(query: str, now_dt: datetime | None = None) -> str | None:
     """
     Evaluate simple date/time questions using system utilities.
-    Returns a natural English answer or None if not a date/time query.
+    Returns a natural English answer or None if not a current date/time query.
+    Rejects questions with location qualifiers, past/future tense, or event targets.
     """
     now = now_dt or datetime.now()
     cleaned = query.strip().lower()
+
+    # Disqualify queries targeting external locations (e.g. "what time is it in Tokyo")
+    if re.search(r"\b(?:in|at|for)\s+[a-z]+", cleaned) and not re.search(r"\b(?:right\s+now|here)\b", cleaned):
+        return None
+
+    # Disqualify queries asking about historical/future events (e.g. "what is the date of Easter", "what year was it created")
+    if re.search(r"\b(?:was|will\s+be|were|did|born|released|happened|occurred)\b", cleaned):
+        return None
+    if re.search(r"\b(?:date|time|year|month)\s+of\b", cleaned):
+        return None
 
     for pattern in _TIME_PATTERNS:
         if re.search(pattern, cleaned):
