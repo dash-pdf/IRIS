@@ -64,10 +64,12 @@ scratch/
 *.dmg
 models/
 
-# ── Private Conversation Archives ──────────────────────────────────
+# ── Private Conversation Archives & Context Cache ──────────────────
 # Keeps folder structure via .gitkeep while keeping user transcripts private
 memory/conversations/*
 !memory/conversations/.gitkeep
+memory/context/*
+!memory/context/.gitkeep
 
 # ── Internal Notes, Personal Planning & Scratch Files ──────────────
 *.docx

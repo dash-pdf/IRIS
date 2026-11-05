@@ -38,6 +38,7 @@ from iris.core.router import (
 
 if TYPE_CHECKING:
     from iris.core.config import IRISConfig
+    from iris.services.context.context_manager import ContextManager
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,12 @@ class CloudRouterModelAdapter(ModelAdapter):
         gemini_adapter: GeminiModelAdapter | None = None,
         archive_dir: Path | None = None,
         persona_name: str = "IRIS",
+        context_manager: ContextManager | None = None,
     ) -> None:
         self.config = config
         self.persona_name = persona_name
         self.archive_dir = archive_dir or getattr(config, "archive_dir", None)
+        self._context_manager = context_manager
 
         # OpenRouter Adapter (Everyday Conversation)
         if openrouter_adapter is not None:
@@ -181,10 +184,12 @@ class CloudRouterModelAdapter(ModelAdapter):
                 )
 
         # 1. Deterministic Classification
+        context_snapshot = self._context_manager.get_context() if self._context_manager else None
         decision = classify_request(
             current_query,
             archive_dir=self.archive_dir,
             persona_name=self.persona_name,
+            context_snapshot=context_snapshot,
         )
 
         self.last_route = decision.route.value
@@ -208,6 +213,20 @@ class CloudRouterModelAdapter(ModelAdapter):
             )
             return decision.direct_response
 
+        # Prepare system prompt enriched with real-time environment context if available
+        effective_system_prompt = system_prompt
+        if self._context_manager:
+            try:
+                context_prompt = self._context_manager.get_prompt_context()
+                if context_prompt:
+                    effective_system_prompt = (
+                        f"{system_prompt}\n\n{context_prompt}"
+                        if system_prompt
+                        else context_prompt
+                    )
+            except Exception as exc:
+                logger.debug("Could not attach context prompt: %s", exc)
+
         # 3. Complex Reasoning (Gemini Flash Free Tier)
         if decision.route == RouteType.COMPLEX_REASONING:
             if self._gemini is None:
@@ -220,7 +239,7 @@ class CloudRouterModelAdapter(ModelAdapter):
                 )
 
             try:
-                reply = self._gemini.generate_response(messages, system_prompt=system_prompt)
+                reply = self._gemini.generate_response(messages, system_prompt=effective_system_prompt)
                 self.last_duration_s = time.perf_counter() - t0
                 self.last_selected_model = getattr(self._gemini, "last_selected_model", self.last_selected_model)
                 self.last_metrics = {
@@ -252,7 +271,7 @@ class CloudRouterModelAdapter(ModelAdapter):
                 )
 
             try:
-                reply = self._openrouter.generate_response(messages, system_prompt=system_prompt)
+                reply = self._openrouter.generate_response(messages, system_prompt=effective_system_prompt)
                 self.last_duration_s = time.perf_counter() - t0
                 self.last_selected_model = getattr(self._openrouter, "last_selected_model", self.last_selected_model)
                 self.last_metrics = {

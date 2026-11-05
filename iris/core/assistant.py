@@ -35,6 +35,7 @@ from iris.audio.vad import VoiceActivityDetector
 from iris.core.config import IRISConfig, load_config
 from iris.core.state import AudioState, AudioStateMachine
 from iris.services.archive import ConversationArchive
+from iris.services.context import ContextManager
 from iris.services.conversation import (
     ConversationService,
     IRIS_LOCAL_SYSTEM_PROMPT,
@@ -55,6 +56,7 @@ class IRISAssistant:
         model_adapter: ModelAdapter | None = None,
         tts_adapter: TTSAdapter | None = None,
         stt_adapter: STTAdapter | None = None,
+        context_manager: ContextManager | None = None,
         on_state_change: Callable[[AudioState, AudioState, str], None] | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         on_assistant_response: Callable[[str], None] | None = None,
@@ -64,13 +66,16 @@ class IRISAssistant:
     ) -> None:
         self.config = config or load_config(require_voice=False)
 
+        # Context Engine
+        self.context_manager = context_manager or ContextManager(config=self.config)
+
         # Adapters
         if model_adapter is not None:
             self.model = model_adapter
         else:
             from iris.adapters.model import create_model_adapter
 
-            self.model = create_model_adapter(self.config)
+            self.model = create_model_adapter(self.config, context_manager=self.context_manager)
         self.tts = tts_adapter or create_tts_adapter(self.config)
         self.stt = stt_adapter or create_stt_adapter(self.config)
 
@@ -152,11 +157,12 @@ class IRISAssistant:
         return 0
 
     def start(self) -> None:
-        """Start the assistant and audio capture."""
+        """Start the assistant, context engine, and audio capture."""
         if self._is_running:
             return
 
         self._is_running = True
+        self.context_manager.start()
         if self.conversation.turn_count == 0:
             self.restore_conversation_history(max_turns=10)
 
@@ -177,6 +183,7 @@ class IRISAssistant:
             return
 
         self._is_running = False
+        self.context_manager.stop()
         self.capture.stop()
         self.player.stop()
         if hasattr(self.tts, "stop"):
@@ -271,8 +278,10 @@ class IRISAssistant:
                 # Stage 3: Time waiting for the LLM response, including the HTTP request
                 # Stage 4: Text generation before response is complete (non-streaming: full response received atomically in Stage 3)
                 messages = self.conversation.get_messages()
+                context_prompt = self.context_manager.get_prompt_context() if hasattr(self, "context_manager") else ""
+                enriched_prompt = f"{self.conversation.system_prompt}\n\n{context_prompt}" if context_prompt else None
                 t_llm_start = time.perf_counter()
-                response_text = self.model.generate_response(messages).strip()
+                response_text = self.model.generate_response(messages, system_prompt=enriched_prompt).strip()
                 t_llm_end = time.perf_counter()
                 llm_duration_s = t_llm_end - t_llm_start
 
@@ -446,8 +455,10 @@ class IRISAssistant:
 
         try:
             messages = self.conversation.get_messages()
+            context_prompt = self.context_manager.get_prompt_context() if hasattr(self, "context_manager") else ""
+            enriched_prompt = f"{self.conversation.system_prompt}\n\n{context_prompt}" if context_prompt else None
             t_llm_start = time.perf_counter()
-            response_text = self.model.generate_response(messages).strip()
+            response_text = self.model.generate_response(messages, system_prompt=enriched_prompt).strip()
             t_llm_end = time.perf_counter()
             llm_duration_s = t_llm_end - t_llm_start
 

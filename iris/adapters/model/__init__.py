@@ -34,16 +34,20 @@ from iris.adapters.model.openrouter_adapter import (
 
 if TYPE_CHECKING:
     from iris.core.config import IRISConfig
+    from iris.services.context.context_manager import ContextManager
 
 
-def create_model_adapter(config: IRISConfig) -> ModelAdapter:
+def create_model_adapter(
+    config: IRISConfig,
+    context_manager: ContextManager | None = None,
+) -> ModelAdapter:
     """
     Instantiate the configured model adapter based on config.
     """
     provider = config.llm_provider.lower()
 
     if provider in {"router", "cloud", "cloud_router"}:
-        return CloudRouterModelAdapter(config=config)
+        return CloudRouterModelAdapter(config=config, context_manager=context_manager)
     elif provider == "openrouter":
         if not config.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY required for OpenRouter model provider.")

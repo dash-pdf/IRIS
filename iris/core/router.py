@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 class RouteType(str, Enum):
     CALCULATION = "calculation"
     DATETIME = "datetime"
+    WEATHER = "weather"
+    LOCATION = "location"
     MEMORY = "memory"
     COMPLEX_REASONING = "complex_reasoning"
     CONVERSATION = "conversation"
@@ -245,15 +247,46 @@ _YEAR_MONTH_PATTERNS = [
     (r"\bwhat\s+month\s+is\s+(?:it|this)\b", "month"),
 ]
 
+_TIMEZONE_PATTERNS = [
+    r"\bwhat\s+timezone\s+(?:is\s+this|am\s+i\s+in|are\s+we\s+in)\b",
+    r"\bwhat\s+is\s+my\s+timezone\b",
+    r"\bwhat\s+is\s+the\s+timezone\b",
+    r"\bwhat(?:\'s|\s+is)\s+our\s+timezone\b",
+]
 
-def try_evaluate_datetime(query: str, now_dt: datetime | None = None) -> str | None:
+
+def try_evaluate_datetime(
+    query: str,
+    now_dt: datetime | None = None,
+    context: Any | None = None,
+) -> str | None:
     """
-    Evaluate simple date/time questions using system utilities.
+    Evaluate simple date/time questions using system utilities or environment context.
     Returns a natural English answer or None if not a current date/time query.
     Rejects questions with location qualifiers, past/future tense, or event targets.
     """
-    now = now_dt or datetime.now()
     cleaned = query.strip().lower()
+
+    # Timezone query check
+    for pattern in _TIMEZONE_PATTERNS:
+        if re.search(pattern, cleaned):
+            if context is not None and getattr(context, "timezone", None) is not None:
+                tz = context.timezone
+                offset = tz.utc_offset_hours
+                offset_str = f"UTC{'+' if offset >= 0 else ''}{int(offset) if offset.is_integer() else offset}"
+                return f"You are currently in the {tz.iana_id} timezone ({tz.timezone_name}, {offset_str})."
+            return None
+
+    now = now_dt
+    if now is None and context is not None and getattr(context, "timezone", None) is not None:
+        try:
+            import zoneinfo
+            tz_obj = zoneinfo.ZoneInfo(context.timezone.iana_id)
+            now = datetime.now(tz_obj)
+        except Exception:
+            now = datetime.now()
+    elif now is None:
+        now = datetime.now()
 
     # Disqualify queries targeting external locations (e.g. "what time is it in Tokyo")
     if re.search(r"\b(?:in|at|for)\s+[a-z]+", cleaned) and not re.search(r"\b(?:right\s+now|here)\b", cleaned):
@@ -293,6 +326,124 @@ def try_evaluate_datetime(query: str, now_dt: datetime | None = None) -> str | N
                 return f"The current month is {now.strftime('%B')}."
 
     return None
+
+
+# ── 3. Deterministic Weather Handler ──────────────────────────────────────────
+
+_WEATHER_PATTERNS = [
+    r"\bwhat(?:\'s|\s+is)\s+the\s+weather\b",
+    r"\bhow(?:\'s|\s+is)\s+the\s+weather\b",
+    r"\bweather\s+(?:today|outside|like|forecast|right\s+now)\b",
+    r"\bwhat\s+is\s+the\s+temperature\b",
+    r"\bwhat(?:\'s|\s+is)\s+it\s+like\s+outside\b",
+    r"\bcurrent\s+weather\b",
+    r"\btell\s+me\s+the\s+weather\b",
+    r"\bwill\s+it\s+rain\b",
+    r"\bis\s+it\s+raining\b",
+    r"\bchance\s+of\s+rain\b",
+    r"\bforecast\s+for\s+(?:today|tomorrow)\b",
+    r"\btomorrow(?:\'s)?\s+weather\b",
+]
+
+_TEMPERATURE_PATTERNS = [
+    r"\bwhat(?:\'s|\s+is)\s+the\s+temperature\b",
+    r"\bhow\s+(?:cold|hot|warm)\s+is\s+it\b",
+    r"\btemperature\s+outside\b",
+    r"\bcurrent\s+temperature\b",
+]
+
+_RAIN_PATTERNS = [
+    r"\bwill\s+it\s+rain\b",
+    r"\bis\s+it\s+raining\b",
+    r"\bchance\s+of\s+rain\b",
+    r"\bis\s+there\s+any\s+rain\b",
+]
+
+_FORECAST_TOMORROW_PATTERNS = [
+    r"\btomorrow(?:\'s)?\s+weather\b",
+    r"\bweather\s+tomorrow\b",
+    r"\bforecast\s+for\s+tomorrow\b",
+]
+
+
+def try_evaluate_weather(query: str, context: Any | None = None) -> str | None:
+    """
+    Evaluate weather questions using local Context Engine snapshot.
+    Returns concise natural English answer or None if not an applicable local query.
+    """
+    if context is None or getattr(context, "weather", None) is None:
+        return None
+
+    cleaned = query.strip().lower()
+    is_weather = any(re.search(pat, cleaned) for pat in _WEATHER_PATTERNS)
+    if not is_weather:
+        return None
+
+    loc_name = context.location.safe_display_name().lower()
+
+    # Disqualify queries asking about an external city not matching detected location
+    target_match = re.search(r"\b(?:in|at|for)\s+([a-z\s]+)", cleaned)
+    if target_match:
+        target_place = target_match.group(1).strip()
+        if target_place not in loc_name and not any(k in target_place for k in ["here", "today", "tomorrow", "this", "outside"]):
+            return None
+
+    weather = context.weather
+    if not weather or not weather.current:
+        return None
+
+    display_loc = context.location.safe_display_name()
+
+    # 1. Temperature query
+    if any(re.search(pat, cleaned) for pat in _TEMPERATURE_PATTERNS):
+        temp = int(round(weather.current.temperature_c))
+        return f"It is currently {temp} degrees Celsius in {display_loc}."
+
+    # 2. Rain query
+    if any(re.search(pat, cleaned) for pat in _RAIN_PATTERNS):
+        is_raining = "rain" in weather.current.condition.lower() or "drizzle" in weather.current.condition.lower()
+        rain_phrase = "It is currently raining" if is_raining else "It is not currently raining"
+        prob = weather.forecast[0].precipitation_probability_pct if weather.forecast else None
+        prob_str = f" with a {prob}% chance of rain today" if prob is not None else ""
+        return f"{rain_phrase} in {display_loc}{prob_str}."
+
+    # 3. Tomorrow's forecast
+    if any(re.search(pat, cleaned) for pat in _FORECAST_TOMORROW_PATTERNS) and len(weather.forecast) > 1:
+        fc = weather.forecast[1]
+        t_max = int(round(fc.temp_max_c))
+        t_min = int(round(fc.temp_min_c))
+        prob_str = f" with a {fc.precipitation_probability_pct}% chance of rain" if fc.precipitation_probability_pct is not None else ""
+        return (
+            f"Tomorrow in {display_loc} will be {fc.condition.lower()}, "
+            f"with a high of {t_max} degrees and a low of {t_min} degrees{prob_str}."
+        )
+
+    # 4. General weather
+    return context.weather_summary_for_voice()
+
+
+# ── 4. Deterministic Location Handler ─────────────────────────────────────────
+
+_LOCATION_PATTERNS = [
+    r"\bwhere\s+am\s+i\b",
+    r"\bwhat\s+is\s+my\s+(?:current\s+)?location\b",
+    r"\bwhat\s+location\s+are\s+we\s+in\b",
+    r"\bwhat\s+city\s+am\s+i\s+in\b",
+    r"\bcurrent\s+location\b",
+]
+
+
+def try_evaluate_location(query: str, context: Any | None = None) -> str | None:
+    """
+    Evaluate location queries safely without exposing coordinates.
+    """
+    cleaned = query.strip().lower()
+    if not any(re.search(pat, cleaned) for pat in _LOCATION_PATTERNS):
+        return None
+
+    if context is not None and getattr(context, "location", None) is not None:
+        return f"Your current detected location is {context.location.safe_display_name()}."
+    return "Your current location has not been determined."
 
 
 # ── 3. Deterministic Memory / Archive Retrieval ───────────────────────────────
@@ -410,14 +561,17 @@ def classify_request(
     query: str,
     archive_dir: Path | None = None,
     persona_name: str = "IRIS",
+    context_snapshot: Any | None = None,
 ) -> RoutingDecision:
     """
     Deterministic routing decision engine:
     1. Exact calculations -> Deterministic Python functions
-    2. Simple date/time operations -> Python/system utilities
-    3. File and conversation-memory retrieval -> Local archive retrieval
-    4. Complex reasoning & difficult questions -> Gemini Flash (Gemini Developer API free tier)
-    5. Everyday conversation -> OpenRouter free models
+    2. Simple date/time operations -> Python/system utilities / Context Engine
+    3. Live weather queries -> Context Engine (Open-Meteo)
+    4. Location queries -> Context Engine (privacy-safe device location)
+    5. File and conversation-memory retrieval -> Local archive retrieval
+    6. Complex reasoning & difficult questions -> Gemini Flash (Gemini Developer API free tier)
+    7. Everyday conversation -> OpenRouter free models
     """
     cleaned = query.strip()
 
@@ -433,7 +587,7 @@ def classify_request(
         )
 
     # 2. Simple Date/Time Operations
-    datetime_result = try_evaluate_datetime(cleaned)
+    datetime_result = try_evaluate_datetime(cleaned, context=context_snapshot)
     if datetime_result is not None:
         return RoutingDecision(
             route=RouteType.DATETIME,
@@ -443,7 +597,29 @@ def classify_request(
             target_model="python_datetime",
         )
 
-    # 3. File & Conversation-Memory Retrieval
+    # 3. Live Weather Operations
+    weather_result = try_evaluate_weather(cleaned, context=context_snapshot)
+    if weather_result is not None:
+        return RoutingDecision(
+            route=RouteType.WEATHER,
+            reason="Deterministic Context Engine live weather lookup",
+            direct_response=weather_result,
+            target_provider="context_engine",
+            target_model="open_meteo",
+        )
+
+    # 4. Device Location Inquiries
+    location_result = try_evaluate_location(cleaned, context=context_snapshot)
+    if location_result is not None:
+        return RoutingDecision(
+            route=RouteType.LOCATION,
+            reason="Deterministic Context Engine location lookup",
+            direct_response=location_result,
+            target_provider="context_engine",
+            target_model="device_location",
+        )
+
+    # 5. File & Conversation-Memory Retrieval
     memory_result = try_evaluate_memory(cleaned, archive_dir=archive_dir, persona_name=persona_name)
     if memory_result is not None:
         return RoutingDecision(
