@@ -80,7 +80,7 @@ class IRISConfig:
     elevenlabs_voice_id: str = "ThT5KcBeYPX3keUQqHPh"  # Default British female voice ID
 
     # LLM provider selection
-    llm_provider: str = "openrouter"  # "ollama" | "openrouter" | "google" | "anthropic" | "openai" | "mock"
+    llm_provider: str = "router"  # "router" | "cloud" | "openrouter" | "google" | "anthropic" | "openai" | "ollama" | "mock"
     ollama_host: str = "http://localhost:11434"
     ollama_keep_alive: str = "30m"
     openrouter_api_key: str = ""
@@ -129,8 +129,19 @@ def load_config(require_voice: bool = True) -> IRISConfig:
         elevenlabs_api_key = _optional("ELEVENLABS_API_KEY")
         elevenlabs_agent_id = _optional("ELEVENLABS_AGENT_ID")
 
-    llm_provider = _optional("IRIS_LLM_PROVIDER", "openrouter").lower()
-    valid_providers = {"ollama", "openrouter", "google", "gemini", "anthropic", "openai", "mock"}
+    llm_provider = _optional("IRIS_LLM_PROVIDER", "router").lower()
+    valid_providers = {
+        "router",
+        "cloud",
+        "cloud_router",
+        "openrouter",
+        "google",
+        "gemini",
+        "anthropic",
+        "openai",
+        "ollama",
+        "mock",
+    }
     if llm_provider not in valid_providers:
         raise ValueError(
             f"IRIS_LLM_PROVIDER must be one of {valid_providers}, got '{llm_provider}'"
@@ -153,7 +164,9 @@ def load_config(require_voice: bool = True) -> IRISConfig:
     ollama_keep_alive = _optional("IRIS_OLLAMA_KEEP_ALIVE", "30m")
 
     default_model = ""
-    if llm_provider == "ollama":
+    if llm_provider in {"router", "cloud", "cloud_router"}:
+        default_model = "router/free"
+    elif llm_provider == "ollama":
         default_model = "llama3.2:1b"
     elif llm_provider == "openrouter":
         default_model = "openrouter/free"

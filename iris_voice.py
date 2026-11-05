@@ -37,6 +37,11 @@ logger = logging.getLogger("iris.runner")
 
 
 def print_banner(config: IRISConfig) -> None:
+    if config.llm_provider in {"router", "cloud", "cloud_router"}:
+        intel_desc = "CLOUD ROUTER (OpenRouter Free + Gemini Flash Free + Deterministic Tools)"
+    else:
+        intel_desc = f"{config.llm_provider.upper()} ({config.llm_model_name})"
+
     if config.tts_provider == "kokoro":
         voice_desc = f"KOKORO ({config.kokoro_voice})"
     elif config.tts_provider == "edge":
@@ -51,7 +56,7 @@ def print_banner(config: IRISConfig) -> None:
    IRIS — Intelligent Reasoning & Interaction System
    Decoupled Half-Duplex Conversational Voice Assistant
 ========================================================================
-   Intelligence (LLM) : {config.llm_provider.upper()} ({config.llm_model_name})
+   Intelligence (LLM) : {intel_desc}
    Voice Output (TTS) : {voice_desc}
    Speech Input (STT) : {config.stt_provider.upper()}
    Audio Input Device : {"#" + str(config.audio_input_device) if config.audio_input_device is not None else "Default Microphone"}
@@ -88,7 +93,11 @@ def list_audio_devices() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="IRIS Decoupled Voice Assistant")
-    parser.add_argument("--llm", choices=["ollama", "openrouter", "anthropic", "google", "gemini", "openai", "mock"], help="LLM provider")
+    parser.add_argument(
+        "--llm",
+        choices=["router", "cloud", "openrouter", "google", "gemini", "anthropic", "openai", "mock", "ollama"],
+        help="LLM provider (default: router)",
+    )
     parser.add_argument("--model", help="Override LLM model name (e.g. llama3.2:1b, openrouter/free)")
     parser.add_argument("--ollama-host", help="Override Ollama host URL (default: http://localhost:11434)")
     parser.add_argument("--ollama-keep-alive", help="Override Ollama keep_alive duration (default: 30m)")

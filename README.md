@@ -2,19 +2,25 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests: 172 passed](https://img.shields.io/badge/tests-172%20passed-brightgreen.svg)](tests/)
+[![Tests: 198 passed](https://img.shields.io/badge/tests-198%20passed-brightgreen.svg)](tests/)
 
-IRIS is a modular, half-duplex conversational voice assistant engineered for macOS (Apple Silicon & Intel) and designed for cross-platform portability. It combines articulate British female voice synthesis, local Voice Activity Detection (VAD), acoustic self-echo filtering, multi-turn conversation memory, and durable Markdown session archiving.
+IRIS is a modular, half-duplex conversational voice assistant engineered for macOS (Apple Silicon & Intel) and designed for cross-platform portability. It combines articulate British female voice synthesis, local Voice Activity Detection (VAD), acoustic self-echo filtering, multi-turn conversation memory, deterministic model routing across free cloud intelligence providers, and durable Markdown session archiving.
 
 ---
 
 ## Key Features
 
+- **Deterministic Cloud Intelligence Routing:** Automatic, lightweight Python classification routes queries to the optimal free-tier provider or deterministic tool without extra LLM overhead:
+  - **Everyday Conversation:** Handled by OpenRouter free-tier models (`openrouter/free`).
+  - **Complex Reasoning & Analysis:** Handled by Google Gemini Flash via the Gemini Developer API free tier (`gemini-3.8-flash`).
+  - **Exact Calculations:** Deterministic AST-based math evaluator for arithmetic, percentages, square roots, and algebraic expansions.
+  - **Date & Time Operations:** Instantaneous system utilities for local time, date, day of the week, and year.
+  - **Session & Memory Retrieval:** Local conversation memory lookup from date-partitioned Markdown session archives.
+- **Strict Free-Tier Enforcement:** Hard safeguards prevent accidental paid-model selection. Strict allowlists block paid endpoints, rate limits halt without paid fallback, and Gemini quota exhaustion prompts the user before degrading to a standard free model.
 - **Half-Duplex Audio State Machine:** Strict transitions (`IDLE` &rarr; `LISTENING` &rarr; `THINKING` &rarr; `SPEAKING` &rarr; `COOLDOWN` &rarr; `IDLE`) with a software mute gate that completely eliminates speaker-to-microphone feedback loops.
 - **Acoustic Self-Echo Cancellation:** Multi-stage `EchoFilter` with fuzzy string matching, content-word Jaccard similarity, and immediate override detection for spoken interruption commands (*"stop"*, *"cancel"*, *"wait"*, *"abort"*).
 - **Speech Text Shaping:** Automatic filtering via `shape_speech_text` that strips Markdown asterisks, headings, list bullets, code fences, and raw URLs before text-to-speech synthesis while preserving unblemished dialogue in conversation archives.
 - **In-Memory Turn History & Context Restoration:** Sliding window turn management (`ConversationService`) that automatically restores context from previous Markdown session archives upon startup.
-- **Multi-Provider Intelligence:** Pluggable LLM adapters supporting local offline inference (Ollama), strictly free cloud routing (OpenRouter), and enterprise hosted APIs (Google Gemini, Anthropic Claude, OpenAI).
 - **Pluggable Voice Synthesis (TTS):** Microsoft Edge Neural TTS (default British female voice `en-GB-SoniaNeural`, free without API keys), local offline Kokoro TTS (ONNX Runtime: `bf_emma`, `bf_alice`), native macOS speech synthesis (`say`), and ElevenLabs TTS.
 - **Pluggable Speech Recognition (STT):** ElevenLabs Scribe STT, interactive terminal console mode (`--text`), and mock offline testing adapters.
 
@@ -30,17 +36,19 @@ IRIS/
 │   │   ├── vad.py                 # Energy-based Voice Activity Detector
 │   │   ├── player.py              # Non-blocking audio queue player with instant abort
 │   │   └── echo_filter.py         # Transcript self-echo filter & interruption patterns
-│   ├── core/                      # Core assistant coordinator & state
+│   ├── core/                      # Core assistant coordinator, router & state
 │   │   ├── assistant.py           # IRISAssistant main runtime orchestrator
+│   │   ├── router.py              # Deterministic classifier & safe math/datetime tools
 │   │   ├── state.py               # Half-duplex AudioStateMachine
 │   │   └── config.py              # Environment configuration loader (.env)
 │   ├── adapters/                  # Pluggable hardware & vendor integrations
 │   │   ├── model/                 # LLM Intelligence adapters
-│   │   │   ├── ollama_adapter.py  # Local Ollama REST adapter (/api/chat, keep-alive, telemetry)
+│   │   │   ├── cloud_router.py    # Cloud Intelligence Router (deterministic routing)
 │   │   │   ├── openrouter_adapter.py # OpenRouter free router with strict allowlist
-│   │   │   ├── gemini_adapter.py  # Google Gemini 3.8 Flash (google-genai SDK)
+│   │   │   ├── gemini_adapter.py  # Google Gemini Flash (google-genai SDK, free allowlist)
 │   │   │   ├── anthropic_adapter.py # Anthropic Claude adapter
 │   │   │   ├── openai_adapter.py  # OpenAI GPT-4o adapter
+│   │   │   ├── ollama_adapter.py  # Local Ollama REST adapter (/api/chat, legacy)
 │   │   │   └── mock_adapter.py    # Offline mock adapter for unit tests
 │   │   ├── tts/                   # Text-to-Speech adapters
 │   │   │   ├── base.py            # Base adapter interface & shape_speech_text cleaner
@@ -61,7 +69,11 @@ IRIS/
 │   ├── smoke_test_openrouter.py   # Live OpenRouter free router smoke test
 │   ├── smoke_test_gemini_phase1.py# Live Google Gemini smoke test
 │   └── test_kokoro_tts.py         # Standalone Kokoro ONNX benchmark script
-├── tests/                         # Comprehensive offline pytest test suite (172 tests)
+├── tests/                         # Comprehensive offline pytest test suite (198 tests)
+│   ├── test_cloud_router.py       # Deterministic tools & routing verification
+│   ├── test_model_adapters.py     # Model adapter unit & factory tests
+│   ├── test_assistant.py          # Assistant turn & lifecycle orchestration
+│   └── ...                        # Audio, state machine, VAD, STT, and TTS tests
 ├── iris_voice.py                  # Main CLI entry point
 ├── requirements.txt               # Production Python dependencies
 ├── .env.example                   # Environment variable template
@@ -76,13 +88,12 @@ IRIS/
 - **Operating System:** macOS Sonoma / Sequoia (Apple Silicon or Intel) or Linux / Windows (with WASAPI).
 - **Python:** Python 3.12 or newer.
 - **Audio Libraries:** [PortAudio](https://www.portaudio.com/) (installed automatically by `sounddevice` wheels, or via `brew install portaudio` on macOS).
-- **Optional Local LLM:** [Ollama](https://ollama.com/) installed and running locally for completely offline execution.
 
 ### 2. Environment Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/IRIS.git
+git clone https://github.com/dash-pdf/IRIS.git
 cd IRIS
 
 # Create and activate a virtual environment
@@ -101,30 +112,25 @@ Copy the example environment file to `.env`:
 cp .env.example .env
 ```
 
-Open `.env` and configure your preferred providers. For example:
+Open `.env` and configure your API credentials:
 
 ```ini
-# Choose your LLM provider: ollama | openrouter | google | anthropic | openai | mock
-IRIS_LLM_PROVIDER=ollama
-IRIS_LLM_MODEL=llama3.2:1b
+# Cloud Intelligence Router (Default)
+IRIS_LLM_PROVIDER=router
 
-# Local Ollama settings (used when IRIS_LLM_PROVIDER=ollama)
-IRIS_OLLAMA_HOST=http://localhost:11434
-IRIS_OLLAMA_KEEP_ALIVE=30m
+# OpenRouter API Key (for everyday conversation via openrouter/free)
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+
+# Google Gemini API Key (for complex reasoning via free-tier Gemini Flash)
+# Get a free key from Google AI Studio Developer API: https://aistudio.google.com/
+GOOGLE_API_KEY=your_google_api_key_here
 
 # Microsoft Edge TTS is the free cloud neural default (no API key required)
 IRIS_TTS_PROVIDER=edge
 IRIS_EDGE_VOICE=en-GB-SoniaNeural
 
-# If using hosted LLM providers, fill in only the key for the provider you use:
-OPENROUTER_API_KEY=your_key_here
-GOOGLE_API_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
-OPENAI_API_KEY=your_key_here
-
-# ElevenLabs credentials (only required if using ElevenLabs STT or TTS)
-ELEVENLABS_API_KEY=your_key_here
-ELEVENLABS_VOICE_ID=ThT5KcBeYPX3keUQqHPh
+# ElevenLabs credentials (only required if using ElevenLabs STT)
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
 ```
 
 ---
@@ -141,10 +147,8 @@ python iris_voice.py
 
 | Argument | Choices / Type | Description |
 |---|---|---|
-| `--llm` | `ollama`, `openrouter`, `google`, `gemini`, `anthropic`, `openai`, `mock` | Override the active LLM provider |
-| `--model` | `string` | Override LLM model name (e.g. `llama3.2:1b`, `openrouter/free`) |
-| `--ollama-host` | `string` | Override Ollama server URL (default: `http://localhost:11434`) |
-| `--ollama-keep-alive`| `string` | Override model memory retention duration (e.g. `30m`, `1h`) |
+| `--llm` | `router`, `cloud`, `openrouter`, `google`, `gemini`, `anthropic`, `openai`, `mock`, `ollama` | Override the active intelligence provider (default: `router`) |
+| `--model` | `string` | Override LLM model name (strict free allowlists enforced) |
 | `--tts` | `edge`, `kokoro`, `macos`, `elevenlabs`, `mock` | Override TTS synthesis engine |
 | `--stt` | `elevenlabs`, `console`, `mock` | Override speech transcription engine |
 | `--voice` | `string` | Override voice preset (e.g. `en-GB-SoniaNeural`, `bf_emma`, `Flo`) |
@@ -154,66 +158,46 @@ python iris_voice.py
 
 ### Common Usage Examples
 
-**1. Completely Free Local LLM + Free Neural Cloud TTS (Default):**
+**1. Default Cloud Intelligence Router + Free Neural Cloud TTS:**
 ```bash
-# Ensure Ollama is running with llama3.2:1b
-ollama run llama3.2:1b
-python iris_voice.py --llm ollama --tts edge
+python iris_voice.py
 ```
 
-**2. Free Hosted Cloud LLM via OpenRouter:**
+**2. Keyboard Text Mode (No Microphone Required):**
 ```bash
-# Requires OPENROUTER_API_KEY in .env
+python iris_voice.py --text
+```
+
+**3. Direct OpenRouter Free Tier:**
+```bash
 python iris_voice.py --llm openrouter --tts edge
 ```
 
-**3. Keyboard Text Mode (No Microphone Required):**
-```bash
-python iris_voice.py --text --llm ollama
-```
-
-**4. Google Gemini 3.8 Flash:**
+**4. Direct Google Gemini Flash Free Tier:**
 ```bash
 python iris_voice.py --llm google --model gemini-3.8-flash --tts edge
 ```
 
 ---
 
-## Supported Components
+## Intelligence Architecture: Deterministic Routing
 
-### Intelligence (LLM) Adapters
+IRIS employs deterministic request classification before making any external calls:
 
-| Provider | Model ID | Connectivity | Notes |
-|---|---|---|---|
-| **Ollama** | `llama3.2:1b` (default) | Local REST | Fully offline. Uses compact `IRIS_LOCAL_SYSTEM_PROMPT`, configurable `keep_alive`, and parses nanosecond telemetry (tokens/sec, prompt eval). |
-| **OpenRouter** | `openrouter/free` | Cloud REST | Strictly enforced free-tier allowlist. Hard no-fallback policy rejecting all paid models. |
-| **Google** | `gemini-3.8-flash` | Cloud SDK | Official `google-genai` SDK with full multi-turn context preservation. |
-| **Anthropic** | `claude-3-5-haiku` | Cloud SDK | Anthropic Messages API client. |
-| **OpenAI** | `gpt-4o-mini` | Cloud REST | Standard OpenAI chat completions. |
-| **Mock** | N/A | Offline memory | Deterministic canned responses for unit tests and local development. |
-
-### Speech Synthesis (TTS) Adapters
-
-| Provider | Default Voice | Requirements | Characteristics |
-|---|---|---|---|
-| **Edge TTS** | `en-GB-SoniaNeural` | Network connection | High-speed neural speech synthesis. Free, zero credentials required. |
-| **Kokoro TTS** | `bf_emma` | `models/kokoro/` weights | Fully offline 82M parameter ONNX neural voice model. |
-| **macOS Say** | `Flo (English (UK))` | macOS system | Offline fallback utilizing macOS native speech synthesis. |
-| **ElevenLabs** | Custom Voice ID | API key | High-fidelity cloud voice synthesis. |
-
-### Speech Recognition (STT) Adapters
-
-| Provider | Requirements | Characteristics |
+| Request Type | Execution Route | Notes |
 |---|---|---|
-| **ElevenLabs Scribe** | API key & microphone | Cloud streaming speech-to-text with automatic punctuation. |
-| **Console STT** | Terminal keyboard | Interactive console input for silent or headphoneless operation. |
-| **Mock STT** | None | Queued string provider for automated pipeline testing. |
+| **Everyday Conversation** | OpenRouter (`openrouter/free`) | Strict free-only allowlist; halts on 429 without paid fallback. |
+| **Complex Reasoning** | Gemini Flash (`gemini-3.8-flash`) | Free tier on Gemini Developer API; asks user before degrading if unavailable. |
+| **Exact Calculations** | Deterministic Python Functions | Safe AST arithmetic, percentages, roots, powers, algebraic expansions. |
+| **Date & Time Operations** | Deterministic System Utilities | Instant local time, date, day of week, and year formatting. |
+| **Session Memory Retrieval** | Local Markdown Archives | Queries `memory/conversations/` session files without hallucinations. |
+| **Future Tasks** | Deterministic Tools | Extensible interface for external tools and actions. |
 
 ---
 
 ## Testing & Diagnostics
 
-The project features a comprehensive test suite of 172 offline unit and integration tests.
+The project features a comprehensive test suite of 198 offline unit and integration tests.
 
 ### Running Automated Tests
 ```bash
@@ -238,8 +222,7 @@ python scripts/smoke_test_gemini_phase1.py
 ## Known Limitations
 
 - **Non-Streaming Generation:** In the current phase, LLM text responses are fetched in full before being passed to TTS. Real-time token streaming pipelining is planned for a future milestone.
-- **Hardware Memory for Local Models:** When using Ollama with `IRIS_OLLAMA_KEEP_ALIVE`, model weights remain in unified memory (~1.5–2.5 GB for 1B–3B parameter models). Ensure adequate free RAM on 8 GB devices.
-- **Upstream Rate Limits:** The `openrouter/free` router endpoint relies on shared public provider capacity and may return HTTP 429 during peak traffic hours. IRIS halts cleanly without silently switching to paid models.
+- **Upstream Rate Limits:** Free-tier cloud providers (`openrouter/free`, Gemini Developer API free tier) enforce rate limits (RPM/RPD). IRIS halts cleanly or prompts the user rather than spending money.
 
 ---
 

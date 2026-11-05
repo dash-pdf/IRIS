@@ -23,7 +23,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from iris.adapters.model import create_model_adapter
 from iris.adapters.model.base import ModelAdapter
 from iris.adapters.stt import create_stt_adapter
 from iris.adapters.stt.base import STTAdapter
@@ -66,7 +65,12 @@ class IRISAssistant:
         self.config = config or load_config(require_voice=False)
 
         # Adapters
-        self.model = model_adapter or create_model_adapter(self.config)
+        if model_adapter is not None:
+            self.model = model_adapter
+        else:
+            from iris.adapters.model import create_model_adapter
+
+            self.model = create_model_adapter(self.config)
         self.tts = tts_adapter or create_tts_adapter(self.config)
         self.stt = stt_adapter or create_stt_adapter(self.config)
 
@@ -307,9 +311,14 @@ class IRISAssistant:
 
                 total_latency_s = t_playback_start - speech_end_time
 
-                # Record turn timings
+                # Record turn timings and intelligence routing diagnostics
                 selected_model = getattr(self.model, "last_selected_model", None) or getattr(self.model, "model_name", None)
+                provider_name = getattr(self.model, "last_provider_name", None) or type(self.model).__name__
+                route = getattr(self.model, "last_route", None)
+                routing_reason = getattr(self.model, "last_routing_reason", None)
+                fallback_decision = getattr(self.model, "last_fallback_decision", None)
                 model_metrics = getattr(self.model, "last_metrics", None)
+
                 self.last_turn_timings = {
                     "turn_id": turn_id,
                     "capture_duration_s": capture_duration_s,
@@ -319,33 +328,46 @@ class IRISAssistant:
                     "tts_duration_s": tts_duration_s,
                     "total_latency_s": total_latency_s,
                     "selected_model": selected_model,
+                    "provider_name": provider_name,
+                    "route": route,
+                    "routing_reason": routing_reason,
+                    "fallback_decision": fallback_decision,
                 }
                 if model_metrics:
                     self.last_turn_timings["model_metrics"] = model_metrics
 
-                ollama_telemetry_line = ""
+                routing_telemetry_line = ""
+                if route or routing_reason:
+                    routing_telemetry_line = f"\n   -> Intelligence Routing: [{route or 'direct'}] {routing_reason or ''}"
+                    if fallback_decision:
+                        routing_telemetry_line += f" | Notice: {fallback_decision}"
+
                 if model_metrics:
                     load_s = model_metrics.get("load_duration_s")
-                    prompt_tokens = model_metrics.get("prompt_eval_count")
-                    prompt_s = model_metrics.get("prompt_eval_duration_s")
-                    eval_tokens = model_metrics.get("eval_count")
-                    eval_s = model_metrics.get("eval_duration_s")
-                    tps = model_metrics.get("tokens_per_second", 0.0)
-                    load_str = f"{load_s:.3f}s" if isinstance(load_s, (int, float)) else "N/A"
-                    prompt_dur_str = f"{prompt_s:.3f}s" if isinstance(prompt_s, (int, float)) else "N/A"
-                    eval_dur_str = f"{eval_s:.3f}s" if isinstance(eval_s, (int, float)) else "N/A"
-                    ollama_telemetry_line = (
-                        f"\n   -> Model Telemetry: load={load_str} | "
-                        f"prompt_eval={prompt_tokens or 0} tok ({prompt_dur_str}) | "
-                        f"eval={eval_tokens or 0} tok ({eval_dur_str}, {tps:.1f} tok/s)"
-                    )
+                    if isinstance(load_s, (int, float)):
+                        prompt_tokens = model_metrics.get("prompt_eval_count")
+                        prompt_s = model_metrics.get("prompt_eval_duration_s")
+                        eval_tokens = model_metrics.get("eval_count")
+                        eval_s = model_metrics.get("eval_duration_s")
+                        tps = model_metrics.get("tokens_per_second", 0.0)
+                        load_str = f"{load_s:.3f}s"
+                        prompt_dur_str = f"{prompt_s:.3f}s" if isinstance(prompt_s, (int, float)) else "N/A"
+                        eval_dur_str = f"{eval_s:.3f}s" if isinstance(eval_s, (int, float)) else "N/A"
+                        routing_telemetry_line += (
+                            f"\n   -> Model Telemetry: load={load_str} | "
+                            f"prompt_eval={prompt_tokens or 0} tok ({prompt_dur_str}) | "
+                            f"eval={eval_tokens or 0} tok ({eval_dur_str}, {tps:.1f} tok/s)"
+                        )
+                    elif "http_duration_s" in model_metrics:
+                        http_s = model_metrics.get("http_duration_s", 0.0)
+                        routing_telemetry_line += f" (Provider HTTP: {http_s:.3f}s)"
 
                 logger.info(
                     "\n============================================================\n"
                     "[TURN TIMING BREAKDOWN] Turn: %s\n"
                     "1. Microphone Capture Duration:       %.3fs (%dms)\n"
                     "2. Speech-to-Text (STT) Processing:   %.3fs (%dms) [%s]\n"
-                    "3. LLM Response (HTTP & wait):        %.3fs (%dms) [%s]%s\n"
+                    "3. Intelligence (LLM / Tools):        %.3fs (%dms) [%s / %s]%s\n"
                     "4. Text Generation (Streaming):       Not implemented (non-streaming; full response received in Stage 3)\n"
                     "5. Text-to-Speech (TTS) Generation:   %.3fs (%dms) [%s]\n"
                     "6. Speech-End to Playback Total:      %.3fs (%dms)\n"
@@ -358,8 +380,9 @@ class IRISAssistant:
                     getattr(self.stt, "provider_name", type(self.stt).__name__),
                     llm_duration_s,
                     int(llm_duration_s * 1000),
+                    provider_name,
                     selected_model or type(self.model).__name__,
-                    ollama_telemetry_line,
+                    routing_telemetry_line,
                     tts_duration_s,
                     int(tts_duration_s * 1000),
                     getattr(self.tts, "voice_name", type(self.tts).__name__),
@@ -455,7 +478,12 @@ class IRISAssistant:
             total_latency_s = t_playback_start - text_turn_start
 
             selected_model = getattr(self.model, "last_selected_model", None) or getattr(self.model, "model_name", None)
+            provider_name = getattr(self.model, "last_provider_name", None) or type(self.model).__name__
+            route = getattr(self.model, "last_route", None)
+            routing_reason = getattr(self.model, "last_routing_reason", None)
+            fallback_decision = getattr(self.model, "last_fallback_decision", None)
             model_metrics = getattr(self.model, "last_metrics", None)
+
             self.last_turn_timings = {
                 "turn_id": turn_id,
                 "capture_duration_s": 0.0,
@@ -465,33 +493,46 @@ class IRISAssistant:
                 "tts_duration_s": tts_duration_s,
                 "total_latency_s": total_latency_s,
                 "selected_model": selected_model,
+                "provider_name": provider_name,
+                "route": route,
+                "routing_reason": routing_reason,
+                "fallback_decision": fallback_decision,
             }
             if model_metrics:
                 self.last_turn_timings["model_metrics"] = model_metrics
 
-            ollama_telemetry_line = ""
+            routing_telemetry_line = ""
+            if route or routing_reason:
+                routing_telemetry_line = f"\n   -> Intelligence Routing: [{route or 'direct'}] {routing_reason or ''}"
+                if fallback_decision:
+                    routing_telemetry_line += f" | Notice: {fallback_decision}"
+
             if model_metrics:
                 load_s = model_metrics.get("load_duration_s")
-                prompt_tokens = model_metrics.get("prompt_eval_count")
-                prompt_s = model_metrics.get("prompt_eval_duration_s")
-                eval_tokens = model_metrics.get("eval_count")
-                eval_s = model_metrics.get("eval_duration_s")
-                tps = model_metrics.get("tokens_per_second", 0.0)
-                load_str = f"{load_s:.3f}s" if isinstance(load_s, (int, float)) else "N/A"
-                prompt_dur_str = f"{prompt_s:.3f}s" if isinstance(prompt_s, (int, float)) else "N/A"
-                eval_dur_str = f"{eval_s:.3f}s" if isinstance(eval_s, (int, float)) else "N/A"
-                ollama_telemetry_line = (
-                    f"\n   -> Model Telemetry: load={load_str} | "
-                    f"prompt_eval={prompt_tokens or 0} tok ({prompt_dur_str}) | "
-                    f"eval={eval_tokens or 0} tok ({eval_dur_str}, {tps:.1f} tok/s)"
-                )
+                if isinstance(load_s, (int, float)):
+                    prompt_tokens = model_metrics.get("prompt_eval_count")
+                    prompt_s = model_metrics.get("prompt_eval_duration_s")
+                    eval_tokens = model_metrics.get("eval_count")
+                    eval_s = model_metrics.get("eval_duration_s")
+                    tps = model_metrics.get("tokens_per_second", 0.0)
+                    load_str = f"{load_s:.3f}s"
+                    prompt_dur_str = f"{prompt_s:.3f}s" if isinstance(prompt_s, (int, float)) else "N/A"
+                    eval_dur_str = f"{eval_s:.3f}s" if isinstance(eval_s, (int, float)) else "N/A"
+                    routing_telemetry_line += (
+                        f"\n   -> Model Telemetry: load={load_str} | "
+                        f"prompt_eval={prompt_tokens or 0} tok ({prompt_dur_str}) | "
+                        f"eval={eval_tokens or 0} tok ({eval_dur_str}, {tps:.1f} tok/s)"
+                    )
+                elif "http_duration_s" in model_metrics:
+                    http_s = model_metrics.get("http_duration_s", 0.0)
+                    routing_telemetry_line += f" (Provider HTTP: {http_s:.3f}s)"
 
             logger.info(
                 "\n============================================================\n"
                 "[TEXT TURN TIMING BREAKDOWN] Turn: %s\n"
                 "1. Microphone Capture Duration:       0.000s (N/A - text turn)\n"
                 "2. Speech-to-Text (STT) Processing:   0.000s (N/A - text turn)\n"
-                "3. LLM Response (HTTP & wait):        %.3fs (%dms) [%s]%s\n"
+                "3. Intelligence (LLM / Tools):        %.3fs (%dms) [%s / %s]%s\n"
                 "4. Text Generation (Streaming):       Not implemented (non-streaming; full response received in Stage 3)\n"
                 "5. Text-to-Speech (TTS) Generation:   %.3fs (%dms) [%s]\n"
                 "6. Processing Latency to Audio:       %.3fs (%dms)\n"
@@ -499,8 +540,9 @@ class IRISAssistant:
                 turn_id[:8],
                 llm_duration_s,
                 int(llm_duration_s * 1000),
+                provider_name,
                 selected_model or type(self.model).__name__,
-                ollama_telemetry_line,
+                routing_telemetry_line,
                 tts_duration_s,
                 int(tts_duration_s * 1000),
                 getattr(self.tts, "voice_name", type(self.tts).__name__),

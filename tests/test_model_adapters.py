@@ -12,6 +12,7 @@ import pytest
 
 from iris.adapters.model import (
     AnthropicModelAdapter,
+    CloudRouterModelAdapter,
     GeminiModelAdapter,
     GoogleModelAdapter,
     MockModelAdapter,
@@ -56,6 +57,10 @@ class TestModelAdapters:
             OpenAIModelAdapter(api_key="")
 
     def test_create_model_adapter_factory(self) -> None:
+        cfg_router = IRISConfig(llm_provider="router")
+        model_router = create_model_adapter(cfg_router)
+        assert isinstance(model_router, CloudRouterModelAdapter)
+
         cfg_mock = IRISConfig(llm_provider="mock")
         model_mock = create_model_adapter(cfg_mock)
         assert isinstance(model_mock, MockModelAdapter)
@@ -78,15 +83,21 @@ class TestModelAdapters:
         assert isinstance(model_google, GeminiModelAdapter)
         assert model_google.model_name == "gemini-3.8-flash"
 
-        # Gemini alias with custom model
+        # Gemini alias with custom free model
         cfg_gemini = IRISConfig(
             llm_provider="gemini",
             google_api_key="test-key",
-            llm_model_name="gemini-2.5-pro",
+            llm_model_name="gemini-2.5-flash",
         )
         model_gemini = create_model_adapter(cfg_gemini)
         assert isinstance(model_gemini, GeminiModelAdapter)
-        assert model_gemini.model_name == "gemini-2.5-pro"
+        assert model_gemini.model_name == "gemini-2.5-flash"
+
+    def test_gemini_rejects_paid_or_unapproved_models(self) -> None:
+        paid_models = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-ultra", "gpt-4o"]
+        for model in paid_models:
+            with pytest.raises(ValueError, match="Strict free-tier allowlist permits only"):
+                GeminiModelAdapter(api_key="test-key", model_name=model)
 
     def test_create_google_model_adapter_missing_key_raises(self) -> None:
         cfg_google_missing = IRISConfig(llm_provider="google", google_api_key="")
