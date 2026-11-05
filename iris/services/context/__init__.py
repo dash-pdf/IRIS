@@ -26,7 +26,14 @@ from iris.services.context.models import (
     wmo_code_to_condition,
 )
 from iris.services.context.timezone import TimezoneService
-from iris.services.context.weather import WeatherService
+from iris.services.context.weather import (
+    APPLE_WEATHERKIT_CONDITION_MAP,
+    AppleWeatherKitProvider,
+    BaseWeatherProvider,
+    OpenMeteoProvider,
+    WeatherService,
+    create_weather_provider,
+)
 
 __all__ = [
     "ContextManager",
@@ -39,6 +46,12 @@ __all__ = [
     "WeatherDailyForecast",
     "WeatherInfo",
     "WeatherService",
+    "BaseWeatherProvider",
+    "OpenMeteoProvider",
+    "AppleWeatherKitProvider",
+    "create_weather_provider",
+    "APPLE_WEATHERKIT_CONDITION_MAP",
     "WMO_CODE_MAP",
     "wmo_code_to_condition",
 ]
+

@@ -134,6 +134,10 @@ class IRISConfig:
     fallback_longitude: float | None = None
     weather_provider: str = "open-meteo"
     weather_api_key: str = ""
+    apple_weather_team_id: str = ""
+    apple_weather_key_id: str = ""
+    apple_weather_service_id: str = ""
+    apple_weather_private_key: str = ""
     context_refresh_interval_s: int = 1800
     weather_cache_ttl_s: int = 1800
     context_cache_dir: Path = field(default_factory=lambda: Path("memory/context"))
@@ -236,6 +240,10 @@ def load_config(require_voice: bool = True) -> IRISConfig:
         fallback_longitude=_optional_float_or_none("IRIS_LOCATION_LONGITUDE"),
         weather_provider=_optional("IRIS_WEATHER_PROVIDER", "open-meteo").lower(),
         weather_api_key=_optional("IRIS_WEATHER_API_KEY", ""),
+        apple_weather_team_id=_optional("APPLE_WEATHER_TEAM_ID"),
+        apple_weather_key_id=_optional("APPLE_WEATHER_KEY_ID"),
+        apple_weather_service_id=_optional("APPLE_WEATHER_SERVICE_ID"),
+        apple_weather_private_key=_optional("APPLE_WEATHER_PRIVATE_KEY"),
         context_refresh_interval_s=_optional_int("IRIS_CONTEXT_REFRESH_INTERVAL", 1800),
         weather_cache_ttl_s=_optional_int("IRIS_WEATHER_CACHE_TTL", 1800),
         context_cache_dir=context_cache_dir,

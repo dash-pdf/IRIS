@@ -57,16 +57,21 @@ from iris.core.router import (
     try_evaluate_weather,
 )
 from iris.services.context import (
+    APPLE_WEATHERKIT_CONDITION_MAP,
+    AppleWeatherKitProvider,
+    BaseWeatherProvider,
     ContextManager,
     IRISContextSnapshot,
     LocationInfo,
     LocationService,
+    OpenMeteoProvider,
     TimezoneInfo,
     TimezoneService,
     WeatherCurrent,
     WeatherDailyForecast,
     WeatherInfo,
     WeatherService,
+    create_weather_provider,
     wmo_code_to_condition,
 )
 
@@ -95,6 +100,40 @@ MOCK_OPEN_METEO_PAYLOAD = {
         "precipitation_sum": [0.0, 3.5, 0.0],
         "precipitation_probability_max": [15, 80, 5],
     },
+}
+
+# Sample Apple WeatherKit API response for Cupertino
+MOCK_APPLE_WEATHERKIT_PAYLOAD = {
+    "currentWeather": {
+        "asOf": "2026-11-05T12:00:00Z",
+        "temperature": 18.5,
+        "temperatureApparent": 17.8,
+        "humidity": 0.65,
+        "conditionCode": "PartlyCloudy",
+        "windSpeed": 10.2,
+        "daylight": True,
+    },
+    "forecastDaily": {
+        "days": [
+            {
+                "forecastStart": "2026-11-05T00:00:00Z",
+                "temperatureMax": 21.0,
+                "temperatureMin": 11.5,
+                "conditionCode": "PartlyCloudy",
+                "precipitationChance": 0.10,
+                "precipitationAmount": 0.0,
+            },
+            {
+                "forecastStart": "2026-11-06T00:00:00Z",
+                "temperatureMax": 19.5,
+                "temperatureMin": 10.0,
+                "conditionCode": "Rain",
+                "precipitationChance": 0.75,
+                "precipitationAmount": 4.2,
+            },
+        ],
+    },
+    "timezone": "America/Los_Angeles",
 }
 
 
@@ -326,6 +365,144 @@ class TestWeatherService:
             weather = service.get_weather(loc)
             assert weather is None
 
+    def test_apple_weatherkit_jwt_generation(self) -> None:
+        import base64
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+        priv = ec.generate_private_key(ec.SECP256R1())
+        pem_key = priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        provider = AppleWeatherKitProvider(
+            team_id="TESTTEAM12",
+            key_id="TESTKEY123",
+            service_id="com.test.iris.weather",
+            private_key=pem_key,
+        )
+
+        token = provider._get_auth_token()
+        parts = token.split(".")
+        assert len(parts) == 3
+
+        # Decode header and payload
+        header_raw = base64.urlsafe_b64decode(parts[0] + "==")
+        payload_raw = base64.urlsafe_b64decode(parts[1] + "==")
+        header = json.loads(header_raw)
+        payload = json.loads(payload_raw)
+
+        assert header["alg"] == "ES256"
+        assert header["kid"] == "TESTKEY123"
+        assert header["id"] == "TESTTEAM12.com.test.iris.weather"
+        assert payload["iss"] == "TESTTEAM12"
+        assert payload["sub"] == "com.test.iris.weather"
+
+        # Verify cryptographic signature with the public key
+        raw_sig = base64.urlsafe_b64decode(parts[2] + "==")
+        assert len(raw_sig) == 64
+        r = int.from_bytes(raw_sig[:32], "big")
+        s = int.from_bytes(raw_sig[32:], "big")
+        der_sig = encode_dss_signature(r, s)
+        signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
+        priv.public_key().verify(der_sig, signing_input, ec.ECDSA(hashes.SHA256()))
+
+    def test_apple_weatherkit_fetch_and_parse(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        priv = ec.generate_private_key(ec.SECP256R1())
+        pem_key = priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        provider = AppleWeatherKitProvider(
+            team_id="TESTTEAM12",
+            key_id="TESTKEY123",
+            service_id="com.test.iris.weather",
+            private_key=pem_key,
+        )
+
+        with patch("httpx.Client.get") as mock_get:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = MOCK_APPLE_WEATHERKIT_PAYLOAD
+            mock_resp.raise_for_status.return_value = None
+            mock_get.return_value = mock_resp
+
+            weather = provider.fetch_weather(lat=37.3346, lon=-122.0090, location_name="Cupertino, CA")
+
+        assert weather is not None
+        assert weather.provider == "apple"
+        assert weather.current is not None
+        assert weather.current.temperature_c == 18.5
+        assert weather.current.condition == "Partly cloudy"
+        assert weather.current.humidity_pct == 65
+        assert len(weather.forecast) == 2
+        assert weather.forecast[0].temp_max_c == 21.0
+        assert weather.forecast[1].condition == "Rain"
+        assert "18°C, Partly cloudy in Cupertino, CA" in weather.summary
+        assert weather.timezone == "America/Los_Angeles"
+
+    def test_weather_provider_factory(self) -> None:
+        # Default -> OpenMeteoProvider
+        prov_default = create_weather_provider()
+        assert isinstance(prov_default, OpenMeteoProvider)
+        assert prov_default.provider_name == "open-meteo"
+
+        # Apple provider without credentials -> logs notice and falls back to Open-Meteo
+        cfg_apple_incomplete = IRISConfig(weather_provider="apple")
+        prov_fallback = create_weather_provider(config=cfg_apple_incomplete)
+        assert isinstance(prov_fallback, OpenMeteoProvider)
+
+        # Apple provider with complete credentials -> AppleWeatherKitProvider
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        priv = ec.generate_private_key(ec.SECP256R1())
+        pem_key = priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        cfg_apple_complete = IRISConfig(
+            weather_provider="apple",
+            apple_weather_team_id="TEAM123456",
+            apple_weather_key_id="KEY1234567",
+            apple_weather_service_id="com.test.service",
+            apple_weather_private_key=pem_key,
+        )
+        prov_apple = create_weather_provider(config=cfg_apple_complete)
+        assert isinstance(prov_apple, AppleWeatherKitProvider)
+        assert prov_apple.provider_name == "apple"
+
+    def test_weather_service_with_apple_provider(self, tmp_path: Path) -> None:
+        mock_apple = MagicMock(spec=AppleWeatherKitProvider)
+        mock_apple.provider_name = "apple"
+        mock_apple.fetch_weather.return_value = WeatherInfo(
+            current=WeatherCurrent(temperature_c=22.0, condition="Clear sky"),
+            forecast=[WeatherDailyForecast(date="2026-11-05", weekday="Thursday", temp_max_c=24.0, temp_min_c=15.0, condition="Clear sky")],
+            provider="apple",
+            summary="22°C, Clear sky in Cupertino, CA.",
+            timezone="America/Los_Angeles",
+        )
+
+        service = WeatherService(cache_dir=tmp_path, provider=mock_apple)
+        assert service.provider_name == "apple"
+
+        loc = LocationInfo(name="Cupertino, CA", latitude=37.3346, longitude=-122.0090)
+        weather = service.get_weather(loc)
+
+        assert weather is not None
+        assert weather.provider == "apple"
+        assert weather.current.temperature_c == 22.0
+        mock_apple.fetch_weather.assert_called_once()
+
 
 # ── 4. ContextManager Tests ───────────────────────────────────────────────────
 
@@ -540,3 +717,4 @@ class TestRouterContextIntegration:
 
             assistant.stop()
             mock_cm.stop.assert_called_once()
+
