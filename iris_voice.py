@@ -159,6 +159,8 @@ def main() -> None:
         cooldown_ms=base_config.cooldown_ms,
         echo_similarity_threshold=base_config.echo_similarity_threshold,
         archive_dir=base_config.archive_dir,
+        vault_dir=base_config.vault_dir,
+        knowledge_index_path=base_config.knowledge_index_path,
         persona_name=base_config.persona_name,
     )
 

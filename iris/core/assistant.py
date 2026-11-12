@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from iris.adapters.memory_stub import MemoryAdapter
 from iris.adapters.model.base import ModelAdapter
 from iris.adapters.stt import create_stt_adapter
 from iris.adapters.stt.base import STTAdapter
@@ -42,6 +43,7 @@ from iris.services.conversation import (
     IRIS_LOCAL_SYSTEM_PROMPT,
     IRIS_SYSTEM_PROMPT,
 )
+from iris.services.knowledge import KnowledgeService, VaultMemoryAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,8 @@ class IRISAssistant:
         tts_adapter: TTSAdapter | None = None,
         stt_adapter: STTAdapter | None = None,
         context_manager: ContextManager | None = None,
+        knowledge_service: KnowledgeService | None = None,
+        memory_adapter: MemoryAdapter | None = None,
         on_state_change: Callable[[AudioState, AudioState, str], None] | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         on_assistant_response: Callable[[str], None] | None = None,
@@ -67,8 +71,13 @@ class IRISAssistant:
     ) -> None:
         self.config = config or load_config(require_voice=False)
 
-        # Context Engine
+        # Context Engine & Knowledge Vault
         self.context_manager = context_manager or ContextManager(config=self.config)
+        self.knowledge_service = knowledge_service or KnowledgeService(
+            vault_dir=self.config.vault_dir,
+            index_path=self.config.knowledge_index_path,
+        )
+        self.memory = memory_adapter or VaultMemoryAdapter(self.knowledge_service)
 
         # Adapters
         if model_adapter is not None:
@@ -76,7 +85,11 @@ class IRISAssistant:
         else:
             from iris.adapters.model import create_model_adapter
 
-            self.model = create_model_adapter(self.config, context_manager=self.context_manager)
+            self.model = create_model_adapter(
+                self.config,
+                context_manager=self.context_manager,
+                knowledge_service=self.knowledge_service,
+            )
         self.tts = tts_adapter or create_tts_adapter(self.config)
         self.stt = stt_adapter or create_stt_adapter(self.config)
 

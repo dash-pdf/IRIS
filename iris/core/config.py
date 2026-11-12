@@ -141,8 +141,10 @@ class IRISConfig:
     cooldown_ms: int = 400
     echo_similarity_threshold: float = 0.70
 
-    # Conversation archive
+    # Conversation archive & permanent Knowledge Vault
     archive_dir: Path = field(default_factory=lambda: Path("memory/conversations"))
+    vault_dir: Path = field(default_factory=lambda: Path("vault"))
+    knowledge_index_path: Path = field(default_factory=lambda: Path("memory/index/knowledge.db"))
 
     # Context Engine configuration
     enable_location_tracking: bool = True
@@ -221,6 +223,12 @@ def load_config(
     project_root = Path(__file__).resolve().parent.parent.parent
     archive_dir = (project_root / archive_dir_str).resolve()
 
+    vault_dir_str = _optional("IRIS_VAULT_DIR", "vault")
+    vault_dir = (project_root / vault_dir_str).resolve()
+
+    knowledge_index_str = _optional("IRIS_KNOWLEDGE_INDEX_PATH", "memory/index/knowledge.db")
+    knowledge_index_path = (project_root / knowledge_index_str).resolve()
+
     context_cache_dir_str = _optional("IRIS_CONTEXT_CACHE_DIR", "memory/context")
     context_cache_dir = (project_root / context_cache_dir_str).resolve()
 
@@ -272,6 +280,8 @@ def load_config(
         cooldown_ms=_optional_int("IRIS_COOLDOWN_MS", 400),
         echo_similarity_threshold=_optional_float("IRIS_ECHO_THRESHOLD", 0.70),
         archive_dir=archive_dir,
+        vault_dir=vault_dir,
+        knowledge_index_path=knowledge_index_path,
         enable_location_tracking=_optional_bool("IRIS_LOCATION_TRACKING", True),
         fallback_location_name=_optional("IRIS_LOCATION_NAME") or _optional("IRIS_FALLBACK_LOCATION_NAME", ""),
         fallback_latitude=_validate_coordinates(

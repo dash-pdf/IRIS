@@ -1,17 +1,13 @@
 """
 iris/adapters/memory_stub.py
 -----------------------------
-Phase 1 stub for the Memory Adapter interface.
+Memory Adapter interface and no-op stub for IRIS.
 
-In Phase 1, IRIS has no long-term memory. This stub satisfies the
-MemoryAdapter interface so that all other components can call it without
-error. It silently returns empty results.
-
-In a later phase, this will be replaced by a HonchoMemoryAdapter that
-queries honcho.dev for synthesised user preferences and past context.
-
-Think of this like a placeholder — the shelf where memory will live
-is already built into the architecture; it's just empty for now.
+All memory consumers depend on ``MemoryAdapter``.
+- ``StubMemoryAdapter`` returns empty context and is used in lightweight/no-op test contexts.
+- ``iris.services.knowledge.VaultMemoryAdapter`` implements read-only Knowledge Vault
+  retrieval over permanent Markdown notes while keeping ``store_turn()`` a no-op so ordinary
+  conversations never auto-create permanent notes.
 """
 
 from __future__ import annotations

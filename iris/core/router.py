@@ -36,6 +36,8 @@ class RouteType(str, Enum):
     DATETIME = "datetime"
     WEATHER = "weather"
     LOCATION = "location"
+    KNOWLEDGE_SAVE = "knowledge_save"
+    KNOWLEDGE_SEARCH = "knowledge_search"
     MEMORY = "memory"
     COMPLEX_REASONING = "complex_reasoning"
     CONVERSATION = "conversation"
@@ -513,6 +515,232 @@ def try_evaluate_memory(
     )
 
 
+# ── 3b. Deterministic Knowledge Vault Handlers (Explicit Intent Only) ──────────
+
+_WAKE_PREFIX_RE = re.compile(r"^(?:hey\s+)?iris[,:\s]+", re.IGNORECASE)
+
+_KNOWLEDGE_SAVE_PATTERNS = [
+    re.compile(
+        r"^(?:please\s+)?(?:add|save|put|store)\s+(?:this|that|it)"
+        r"(?:\s+information)?\s+(?:to|in|into|as)\s+(?:my\s+)?"
+        r"(?:notes|knowledge\s+vault|vault|a\s+note|inbox)\b(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:create|make|write|save|add)\s+(?:a\s+)?(?:new\s+)?note\b(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^(?:please\s+)?remember\s+this\s+information\b(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^(?:please\s+)?save\s+this\s+(?:as\s+a\s+note|to\s+(?:my\s+)?notes|"
+        r"to\s+(?:my\s+)?(?:knowledge\s+)?vault|to\s+(?:my\s+)?inbox|information)\b(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^(?:please\s+)?capture\s+(?:this|to\s+(?:my\s+)?inbox|a\s+note)\b(.*)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+]
+
+_KNOWLEDGE_SEARCH_PATTERNS = [
+    re.compile(
+        r"^(?:please\s+)?(?:search|find|check|look\s+up|list|show)\s+(?:in\s+)?(?:my\s+)?"
+        r"(?:knowledge\s+)?vault(?:\s+(?:for|about|on)\s+(.+))?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:search|find|list|show)\s+(?:my\s+)?notes"
+        r"(?:\s+(?:for|about|on|in|tagged)\s+(.+))?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?look\s+up\s+(.+?)\s+in\s+(?:my\s+)?(?:notes|knowledge\s+vault|vault)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:what|which)\s+notes\s+do\s+i\s+have(?:\s+(?:for|about|on|in)\s+(.+))?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:check|list|show)\s+(?:my\s+)?(?:knowledge\s+)?inbox\b(.*)$",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _derive_note_title(content: str, explicit_title: str = "") -> str:
+    """Derive a concise title directly from explicit user/content text without inventing details."""
+    if explicit_title.strip():
+        return explicit_title.strip()[:80]
+    first_line = next((line.strip() for line in content.splitlines() if line.strip()), "")
+    clean = re.sub(r"^#+\s*", "", first_line).strip()
+    if len(clean) <= 60:
+        return clean or "Captured Note"
+    truncated = clean[:57].rsplit(" ", 1)[0].strip()
+    return f"{truncated or clean[:57]}..."
+
+
+def _extract_save_payload(
+    cleaned_query: str,
+    remainder: str,
+    prior_context: str | None = None,
+) -> tuple[str, str, bool]:
+    """
+    Extract (title, body, target_inbox) from an explicit save request.
+
+    Returns ("", "", target_inbox) if the user provided no inline content and
+    there is no prior context to capture.
+    """
+    target_inbox = bool(re.search(r"\b(?:to|in|into)\s+(?:my\s+)?inbox\b|^capture\b", cleaned_query, re.IGNORECASE))
+    title = ""
+
+    rest = remainder.strip()
+    # Optional explicit title marker: titled "..." / called "..."
+    title_match = re.match(
+        r'^(?:titled|called|named)\s+["\']([^"\']+)["\'](?:\s*[:\-–—]?\s*(.*))?$',
+        rest,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if title_match:
+        title = title_match.group(1).strip()
+        rest = (title_match.group(2) or "").strip()
+
+    # Strip leading connectors like ':', '-', 'saying', 'about', 'that'
+    rest = re.sub(r"^(?:[:\-–—]+|(?:saying|about|that)\b\s*:?)\s*", "", rest, flags=re.IGNORECASE).strip()
+
+    body = rest or (prior_context.strip() if prior_context else "")
+    if not body:
+        return "", "", target_inbox
+
+    return _derive_note_title(body, explicit_title=title), body, target_inbox
+
+
+def try_evaluate_knowledge_save(
+    query: str,
+    knowledge_service: Any | None = None,
+    prior_context: str | None = None,
+) -> str | None:
+    """
+    Persist a permanent note ONLY when the user expresses explicit save intent.
+
+    Returns None when the input is ordinary dialogue or a question without save intent.
+    """
+    cleaned = _WAKE_PREFIX_RE.sub("", query.strip()).strip()
+    if not cleaned:
+        return None
+
+    matched_remainder: str | None = None
+    for pat in _KNOWLEDGE_SAVE_PATTERNS:
+        m = pat.match(cleaned)
+        if m:
+            matched_remainder = m.group(1) or ""
+            break
+
+    if matched_remainder is None:
+        return None
+
+    if knowledge_service is None:
+        return (
+            "I recognized your request to save a note, but the Knowledge Vault "
+            "service is not configured in this session."
+        )
+
+    title, body, target_inbox = _extract_save_payload(cleaned, matched_remainder, prior_context)
+    if not body:
+        return "What exact information would you like me to save to your Knowledge Vault?"
+
+    if target_inbox:
+        note = knowledge_service.capture_to_inbox(content=body, title=title)
+        return (
+            f"Captured to Knowledge Vault Inbox as \"{note.metadata.title}\" "
+            f"({note.relative_path})."
+        )
+
+    note = knowledge_service.create_note(
+        title=title,
+        content=body,
+        folder="Notes",
+        note_type="note",
+    )
+    return (
+        f"Saved permanent note \"{note.metadata.title}\" to your Knowledge Vault "
+        f"at {note.relative_path} (separate from conversation archives)."
+    )
+
+
+def try_evaluate_knowledge_search(
+    query: str,
+    knowledge_service: Any | None = None,
+) -> str | None:
+    """
+    Search permanent Markdown notes in the Knowledge Vault via SQLite FTS5.
+
+    Explicitly separates permanent notes from conversation archives in responses.
+    """
+    cleaned = _WAKE_PREFIX_RE.sub("", query.strip()).strip()
+    if not cleaned:
+        return None
+
+    matched = False
+    search_clause = ""
+    is_inbox_query = bool(
+        re.match(r"^(?:please\s+)?(?:check|list|show)\s+(?:my\s+)?(?:knowledge\s+)?inbox\b", cleaned, re.IGNORECASE)
+    )
+    for pat in _KNOWLEDGE_SEARCH_PATTERNS:
+        m = pat.match(cleaned)
+        if m:
+            matched = True
+            search_clause = (m.group(1) or "").strip() if m.lastindex else ""
+            break
+
+    if not matched:
+        return None
+
+    if knowledge_service is None:
+        return "The Knowledge Vault service is not configured in this session."
+
+    folder_filter: str | None = "Inbox" if is_inbox_query else None
+    tags_filter: list[str] = []
+
+    if search_clause:
+        folder_m = re.search(
+            r"\bin\s+(Inbox|Notes|Projects|Research|Archive)\b",
+            search_clause,
+            re.IGNORECASE,
+        )
+        if folder_m:
+            folder_filter = folder_m.group(1)
+            search_clause = (search_clause[: folder_m.start()] + search_clause[folder_m.end() :]).strip()
+
+        for tag_m in re.finditer(r"(?:#|tagged\s+)([a-zA-Z0-9_-]+)", search_clause, re.IGNORECASE):
+            tags_filter.append(tag_m.group(1).lower())
+        search_clause = re.sub(r"(?:#|tagged\s+)[a-zA-Z0-9_-]+", "", search_clause, flags=re.IGNORECASE).strip()
+
+    results = knowledge_service.search(
+        query=search_clause,
+        tags=tags_filter or None,
+        folder=folder_filter,
+        limit=5,
+    )
+    if not results:
+        scope_desc = f" in {folder_filter}" if folder_filter else ""
+        return (
+            f"I searched your permanent Knowledge Vault{scope_desc} "
+            "(separate from session conversation archives) and found no matching notes."
+        )
+
+    lines = [
+        f"Found {len(results)} permanent note{'s' if len(results) != 1 else ''} in your Knowledge Vault:"
+    ]
+    for item in results:
+        snippet = f" — {item.excerpt}" if item.excerpt else ""
+        lines.append(f"- [{item.folder}] {item.title} ({item.relative_path}){snippet}")
+    return "\n".join(lines)
+
+
 # ── 4. Complex Reasoning vs. Everyday Conversation Classifier ─────────────────
 
 _COMPLEX_KEYWORDS = [
@@ -562,6 +790,8 @@ def classify_request(
     archive_dir: Path | None = None,
     persona_name: str = "IRIS",
     context_snapshot: Any | None = None,
+    knowledge_service: Any | None = None,
+    prior_context: str | None = None,
 ) -> RoutingDecision:
     """
     Deterministic routing decision engine:
@@ -569,9 +799,11 @@ def classify_request(
     2. Simple date/time operations -> Python/system utilities / Context Engine
     3. Live weather queries -> Context Engine (Open-Meteo)
     4. Location queries -> Context Engine (privacy-safe device location)
-    5. File and conversation-memory retrieval -> Local archive retrieval
-    6. Complex reasoning & difficult questions -> Gemini Flash (Gemini Developer API free tier)
-    7. Everyday conversation -> OpenRouter free models
+    5. Explicit Knowledge Vault saves -> Permanent Markdown Vault
+    6. Knowledge Vault search -> Disposable SQLite FTS5 index
+    7. File and conversation-memory retrieval -> Local archive retrieval
+    8. Complex reasoning & difficult questions -> Gemini Flash (Gemini Developer API free tier)
+    9. Everyday conversation -> OpenRouter free models
     """
     cleaned = query.strip()
 
@@ -619,7 +851,36 @@ def classify_request(
             target_model="device_location",
         )
 
-    # 5. File & Conversation-Memory Retrieval
+    # 5. Explicit Knowledge Vault Save (requires explicit save intent)
+    knowledge_save_result = try_evaluate_knowledge_save(
+        cleaned,
+        knowledge_service=knowledge_service,
+        prior_context=prior_context,
+    )
+    if knowledge_save_result is not None:
+        return RoutingDecision(
+            route=RouteType.KNOWLEDGE_SAVE,
+            reason="Explicit user request to save permanent knowledge note",
+            direct_response=knowledge_save_result,
+            target_provider="knowledge_vault",
+            target_model="markdown_vault",
+        )
+
+    # 6. Knowledge Vault Search (separate from conversation archives)
+    knowledge_search_result = try_evaluate_knowledge_search(
+        cleaned,
+        knowledge_service=knowledge_service,
+    )
+    if knowledge_search_result is not None:
+        return RoutingDecision(
+            route=RouteType.KNOWLEDGE_SEARCH,
+            reason="Knowledge Vault full-text FTS5 retrieval",
+            direct_response=knowledge_search_result,
+            target_provider="knowledge_vault",
+            target_model="sqlite_fts5",
+        )
+
+    # 7. File & Conversation-Memory Retrieval
     memory_result = try_evaluate_memory(cleaned, archive_dir=archive_dir, persona_name=persona_name)
     if memory_result is not None:
         return RoutingDecision(

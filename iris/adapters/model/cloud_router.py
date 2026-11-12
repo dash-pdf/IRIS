@@ -39,6 +39,7 @@ from iris.core.router import (
 if TYPE_CHECKING:
     from iris.core.config import IRISConfig
     from iris.services.context.context_manager import ContextManager
+    from iris.services.knowledge.service import KnowledgeService
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,13 @@ class CloudRouterModelAdapter(ModelAdapter):
         archive_dir: Path | None = None,
         persona_name: str = "IRIS",
         context_manager: ContextManager | None = None,
+        knowledge_service: KnowledgeService | None = None,
     ) -> None:
         self.config = config
         self.persona_name = persona_name
         self.archive_dir = archive_dir or getattr(config, "archive_dir", None)
         self._context_manager = context_manager
+        self._knowledge_service = knowledge_service
 
         # OpenRouter Adapter (Everyday Conversation)
         if openrouter_adapter is not None:
@@ -185,11 +188,14 @@ class CloudRouterModelAdapter(ModelAdapter):
 
         # 1. Deterministic Classification
         context_snapshot = self._context_manager.get_context() if self._context_manager else None
+        prior_context = last_assistant_reply or self._find_prior_complex_question(messages)
         decision = classify_request(
             current_query,
             archive_dir=self.archive_dir,
             persona_name=self.persona_name,
             context_snapshot=context_snapshot,
+            knowledge_service=self._knowledge_service,
+            prior_context=prior_context,
         )
 
         self.last_route = decision.route.value

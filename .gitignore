@@ -76,11 +76,13 @@ scratch/
 models/
 
 # ── Private Conversation Archives & Context Cache ──────────────────
-# Keeps folder structure via .gitkeep while keeping user transcripts private
+# Keeps folder structure via .gitkeep while keeping user transcripts & notes private
 memory/conversations/*
 !memory/conversations/.gitkeep
 memory/context/*
 !memory/context/.gitkeep
+vault/*/*.md
+vault/*.md
 
 # ── Internal Notes, Personal Planning & Scratch Files ──────────────
 *.docx
