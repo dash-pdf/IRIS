@@ -51,8 +51,19 @@ memory/
 - **Crash-Safe Capture Inbox**: Items captured to `vault/Inbox/` remain intact on disk and in the index if downstream triage or classification raises an error.
 - **Disposable SQLite FTS5 Index (`index.py`)**: Supports punctuation-safe full-text queries along with `tags`, `note_type`, and `folder` filters. Deleting `memory/index/knowledge.db` never loses notes; `KnowledgeService.rebuild_index()` reconstructs the index directly from `vault/**/*.md`.
 
-### 5. Security & Credential Handling (`iris/core/security.py`, `iris/core/credentials.py`)
-- Centralised secret resolution (environment variables and macOS Keychain via `keyring`) and error/log redaction so API keys and tokens never appear in terminal output, conversation transcripts, or Knowledge Vault files.
+### 5. PySide6 Desktop Application Shell (`iris/desktop/`, `iris_desktop.py`)
+- **Three-Panel Dark Workspace (`iris/desktop/main_window.py`, `theme.py`)**: Uses `#09090D` / `#14131B` backgrounds with `#8057D9` / `#B69AFF` accents:
+  - **Left Sidebar (`widgets/sidebar.py`)**: Navigation for `Home`, `Knowledge`, `Research` *(Planned)*, `Calendar` *(Planned)*, `Tasks` *(Planned)*, `Music` *(Planned)*, and `Settings`, alongside the live Markdown Vault folder tree (`Inbox`, `Notes`, `Projects`, `Research`, `Archive`).
+  - **Centre Workspace (`widgets/home_page.py`, `knowledge_page.py`, `research_page.py`, `placeholders.py`)**: Live Home dashboard (weather/location context, Inbox count, recent notes, quick deterministic search & capture), tabbed Knowledge Vault Markdown editor/previewer & Inbox triage connected to `KnowledgeService`, modular Research & Video Intelligence Phase 4 container, clearly marked placeholders, and redacted non-secret Settings view.
+  - **Right Assistant Panel (`widgets/assistant_panel.py`)**: Active session history, message composer, processing indicator, and secret-redacted error banner wired through `IRISDesktopBackend` (`QThreadPool` + Qt Signals) to `IRISAssistant`.
+  - **Persistent Bottom Voice Control Bar (`widgets/voice_bar.py`)**: Microphone toggle with honest active/muted/inactive status, listening indicator (never shown active when mic is off), assistant activity state, and accessible quick text command input.
+
+### 6. Application-Wide LLM Usage Policy & Research Compatibility (`iris/core/policy.py`, `iris/services/research/`)
+- **Deterministic First (`LLMUsagePolicy`)**: Ordinary operations (Markdown note CRUD, folder moves, Inbox persistence, SQLite FTS5 search, math, date/time, context retrieval) run offline in Python/SQLite with zero LLM calls; AI reasoning flows exclusively through `IRISAssistant` and `ModelAdapter`.
+- **Research & Video Intelligence Contracts (`iris/services/research/`)**: Modular Phase 4 interfaces (`ResearchWorkspaceBridge`, `ResearchSource`, `VideoResearchSummary`, `VideoTimestamp`) flagging external content untrusted, preserving URLs/timestamps, refusing to fabricate inaccessible video analyses, and requiring explicit user confirmation before writing to `vault/Research/`.
+
+### 7. Security & Credential Handling (`iris/core/security.py`, `iris/core/credentials.py`)
+- Centralised secret resolution (environment variables and macOS Keychain via `keyring`) and error/log redaction so API keys and tokens never appear in terminal output, conversation transcripts, Knowledge Vault files, or desktop Settings views.
 - `.env`, runtime caches (`memory/`), SQLite databases (`*.db`), and private Markdown notes (`vault/*/*.md`) are excluded from version control via `.gitignore`.
 
 ---
@@ -75,7 +86,11 @@ memory/
    - Provider keys (`ELEVENLABS_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, etc.) and optional manual location settings (`IRIS_LOCATION_LAT`, `IRIS_LOCATION_LON`, `IRIS_LOCATION_LABEL`).
 
 ### Launching IRIS
-- Full voice assistant launcher:
+- PySide6 Desktop Application (Phase 2):
+  ```bash
+  ./run.sh --desktop
+  ```
+- Full CLI voice assistant launcher:
   ```bash
   ./run.sh
   ```
@@ -86,7 +101,7 @@ memory/
   ```
 
 ### Running Tests
-Run the full automated test suite (**269 tests** across 17 test modules):
+Run the full automated test suite (**274 tests** across 18 test modules):
 ```bash
 .venv/bin/pytest tests/
 ```
@@ -94,9 +109,8 @@ Run the full automated test suite (**269 tests** across 17 test modules):
 ---
 
 ## Roadmap / Upcoming Phases (Not Yet Implemented)
-The following planned features remain outside the current Phase 0 / Phase 1 implementation:
-- PySide6 desktop HUD and GUI
-- Double-clap hands-free voice presence activation
-- Embedded research browser
-- Google Calendar & Spotify integrations
+The following planned features remain outside the current Phase 2 implementation:
+- **Phase 3 — Voice Presence System**: Double-clap hands-free activation and always-ready acoustic triggers
+- **Phase 4 — Research Engine & Mandatory Video Intelligence**: Embedded multi-tab research browser, webpage extraction, and full Video Intelligence (lecture/video discovery, caption/transcript retrieval, audio transcription when permitted, timestamped concept analysis, study notes, comparison, and revision flashcards)
+- Google Calendar, Tasks, and Spotify integrations
 - Proactive background reminders and notifications

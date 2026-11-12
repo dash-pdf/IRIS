@@ -33,6 +33,9 @@ anthropic>=0.30.0,<1.0.0
 # OpenAI SDK
 openai>=1.40.0,<2.0.0
 
+# ── Desktop Application Framework (Phase 2+) ────────────────────────────────
+PySide6>=6.7.0,<7.0.0
+
 # ── Testing & Verification ────────────────────────────────────────────────
 pytest>=8.0.0,<10.0.0
 pytest-asyncio>=0.23.0,<2.0.0

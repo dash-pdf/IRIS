@@ -4,6 +4,7 @@
 # One-Command Launcher
 # ==============================================================================
 # Usage:
+#   ./run.sh --desktop   # Launch PySide6 IRIS Desktop Application (Phase 2)
 #   ./run.sh             # Hands-free voice assistant mode
 #   ./run.sh --text      # Interactive text chat mode (no mic needed)
 #   ./run.sh --help      # Show all available options and flags
@@ -41,7 +42,11 @@ if [ ! -f "$SCRIPT_DIR/bin/IrisLocationHelper.app/Contents/MacOS/IrisLocationHel
     fi
 fi
 
-# 4. Launch IRIS forwarding all command-line arguments
+# 4. Launch IRIS Desktop UI if --desktop is passed; otherwise launch CLI/voice runner
+if [ "${1:-}" = "--desktop" ]; then
+    shift
+    exec "$VENV_PYTHON" "$SCRIPT_DIR/iris_desktop.py" "$@"
+fi
 exec "$VENV_PYTHON" "$SCRIPT_DIR/iris_voice.py" "$@"
 
 

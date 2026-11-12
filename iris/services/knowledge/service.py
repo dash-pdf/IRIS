@@ -318,6 +318,10 @@ class KnowledgeService:
         """Rebuild the disposable SQLite FTS5 index completely from vault Markdown files."""
         return self._index.rebuild_from_vault(self._storage)
 
+    def get_folder_counts(self) -> dict[str, int]:
+        """Return note counts per canonical Vault folder without reading Markdown bodies."""
+        return self._index.get_folder_counts()
+
     @staticmethod
     def _derive_title(content: str, max_words: int = 8) -> str:
         first_line = next((line.strip() for line in content.splitlines() if line.strip()), "Captured Note")

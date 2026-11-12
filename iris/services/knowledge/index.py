@@ -233,6 +233,15 @@ class KnowledgeIndex:
                 row = conn.execute("SELECT COUNT(*) AS cnt FROM knowledge_notes").fetchone()
                 return int(row["cnt"]) if row else 0
 
+    def get_folder_counts(self) -> dict[str, int]:
+        """Return note counts grouped by canonical vault folder."""
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT folder, COUNT(*) AS cnt FROM knowledge_notes GROUP BY folder"
+                ).fetchall()
+                return {str(row["folder"]): int(row["cnt"]) for row in rows}
+
     def search(
         self,
         query: str = "",

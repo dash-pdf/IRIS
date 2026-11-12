@@ -170,28 +170,47 @@ class IRISAssistant:
             return len(turns)
         return 0
 
-    def start(self) -> None:
-        """Start the assistant, context engine, and audio capture."""
+    def start(self, capture_audio: bool = True, initial_context_refresh: bool = True) -> None:
+        """Start the assistant, context engine, and optional microphone audio capture."""
         if self._is_running:
             return
 
         self._is_running = True
-        self.context_manager.start()
+        self.context_manager.start(initial_refresh=initial_context_refresh)
         if self.conversation.turn_count == 0:
             self.restore_conversation_history(max_turns=10)
 
         self.archive.open_session()
         self.state_machine.reset()
         from iris.adapters.stt.console_stt import ConsoleSTT
-        if not isinstance(self.stt, ConsoleSTT):
+        if capture_audio and not isinstance(self.stt, ConsoleSTT):
             self.capture.unmute()
             self.capture.start(on_frame=self._on_audio_frame)
         logger.info(
-            "IRIS assistant started (Model: %s, TTS: %s, STT: %s)",
+            "IRIS assistant started (Model: %s, TTS: %s, STT: %s, mic_active=%s)",
             self.model.__class__.__name__,
             self.tts.voice_name,
             self.stt.provider_name,
+            self.capture.is_running,
         )
+
+    def enable_microphone(self) -> None:
+        """Activate microphone capture on demand when voice STT is configured."""
+        from iris.adapters.stt.console_stt import ConsoleSTT
+
+        if isinstance(self.stt, ConsoleSTT):
+            raise RuntimeError(
+                "Microphone voice capture is unavailable while STT provider is set to 'console'."
+            )
+        if not self._is_running:
+            self.start(capture_audio=False, initial_context_refresh=False)
+        self.capture.unmute()
+        self.capture.start(on_frame=self._on_audio_frame)
+
+    def disable_microphone(self) -> None:
+        """Deactivate microphone capture without tearing down the rest of IRIS."""
+        self.capture.mute()
+        self.capture.stop()
 
     def stop(self) -> None:
         """Stop audio processing and cleanly shut down."""
@@ -449,10 +468,15 @@ class IRISAssistant:
         self.state_machine.transition_to(AudioState.IDLE)
         self.capture.unmute()
 
-    def process_text_turn(self, text: str, wait_for_playback: bool = True) -> str:
+    def process_text_turn(
+        self,
+        text: str,
+        wait_for_playback: bool = True,
+        speak: bool = True,
+    ) -> str:
         """
         Process a text message directly without microphone input.
-        Useful for console fallback, testing, or keyboard chat.
+        Useful for console fallback, desktop chat, or keyboard commands.
         """
         # If currently speaking or in cooldown, wait for previous utterance to finish
         if self.state_machine.state in {AudioState.SPEAKING, AudioState.COOLDOWN}:
@@ -489,20 +513,25 @@ class IRISAssistant:
             self.conversation.add_assistant_turn(response_text)
             self.archive.write_turn("assistant", response_text)
 
-            # Synthesize and play
-            self.state_machine.transition_to(AudioState.SPEAKING, expected_turn_id=turn_id)
-
-            def on_done() -> None:
-                self._on_playback_completed(turn_id)
-
+            # Synthesize and play only when spoken output is requested
             t_tts_start = time.perf_counter()
-            if hasattr(self.tts, "speak"):
-                self.tts.speak(speech_text, blocking=False, on_done=on_done)
+            if speak:
+                self.state_machine.transition_to(AudioState.SPEAKING, expected_turn_id=turn_id)
+
+                def on_done() -> None:
+                    self._on_playback_completed(turn_id)
+
+                if hasattr(self.tts, "speak"):
+                    self.tts.speak(speech_text, blocking=False, on_done=on_done)
+                else:
+                    samples, sample_rate = self.tts.synthesize(speech_text)
+                    self.player.play(samples, sample_rate=sample_rate, on_done=on_done)
+                t_playback_start = time.perf_counter()
+                tts_duration_s = t_playback_start - t_tts_start
             else:
-                samples, sample_rate = self.tts.synthesize(speech_text)
-                self.player.play(samples, sample_rate=sample_rate, on_done=on_done)
-            t_playback_start = time.perf_counter()
-            tts_duration_s = t_playback_start - t_tts_start
+                self._reset_to_idle()
+                t_playback_start = time.perf_counter()
+                tts_duration_s = 0.0
             total_latency_s = t_playback_start - text_turn_start
 
             selected_model = getattr(self.model, "last_selected_model", None) or getattr(self.model, "model_name", None)
@@ -578,7 +607,7 @@ class IRISAssistant:
                 int(total_latency_s * 1000),
             )
 
-            if wait_for_playback:
+            if speak and wait_for_playback:
                 self.player.wait()
 
             return response_text
