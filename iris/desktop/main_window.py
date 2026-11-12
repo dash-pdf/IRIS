@@ -15,7 +15,7 @@ Layout:
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QMainWindow,
     QSplitter,
@@ -160,11 +160,19 @@ class IRISMainWindow(QMainWindow):
         self.backend.assistant_error.connect(self.assistant_panel.show_error)
 
         self.backend.mic_status_changed.connect(self.voice_bar.update_mic_status)
+        self.backend.presence_state_changed.connect(self._on_presence_state_changed)
         self.backend.silence_warning_received.connect(
             lambda: self.assistant_panel.show_error(
                 "Microphone captures only silence — verify macOS Microphone permission in System Settings."
             )
         )
+
+        self.presence_shortcut = QShortcut(
+            QKeySequence(self.backend.config.presence_shortcut),
+            self,
+        )
+        self.presence_shortcut.activated.connect(self.backend.toggle_armed_or_dormant)
+        self.backend.emit_presence_status()
 
     def navigate_to(self, page_key: str) -> None:
         """Switch active centre workspace page cleanly."""
@@ -215,6 +223,16 @@ class IRISMainWindow(QMainWindow):
             self.assistant_panel.state_pill.setText(state_value.title())
         elif state_value == "idle" and not self.backend.is_turn_in_flight:
             self.assistant_panel.state_pill.setText("Idle")
+
+    def _on_presence_state_changed(
+        self,
+        state_value: str,
+        reason: str,
+        stt_listening_enabled: bool,
+    ) -> None:
+        self.voice_bar.update_presence_state(state_value, reason, stt_listening_enabled)
+        if self.active_page_key() == "settings":
+            self.settings_page.refresh_view()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.backend.shutdown()

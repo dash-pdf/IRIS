@@ -91,7 +91,7 @@ def list_audio_devices() -> None:
     print()
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="IRIS Decoupled Voice Assistant")
     parser.add_argument(
         "--llm",
@@ -107,7 +107,16 @@ def main() -> None:
     parser.add_argument("--device", type=int, help="Input audio device ID index")
     parser.add_argument("--list-devices", action="store_true", help="List audio input and output devices and exit")
     parser.add_argument("--text", action="store_true", help="Interactive terminal text mode (bypasses mic capture)")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--dormant",
+        action="store_true",
+        help="Start in local DORMANT standby (activate/deactivate hands-free with a double-clap)",
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
 
     if args.list_devices:
         list_audio_devices()
@@ -213,7 +222,7 @@ def main() -> None:
     )
 
     try:
-        assistant.start()
+        assistant.start(start_dormant=args.dormant)
 
         if args.text or stt_provider == "console":
             print("Type your message and press Enter (or 'quit' / 'exit' to stop):")

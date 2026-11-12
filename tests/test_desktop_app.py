@@ -237,8 +237,15 @@ def test_error_handling_sanitizes_secrets_and_voice_bar_is_honest(
         assert "sk-or-v1-secret-should-never-leak" not in banner_text
         assert "REDACTED" in banner_text
 
+        # Simulate dormant clap standby -> Mic Active, Listening strictly Off
+        backend.presence_state_changed.emit("DORMANT", "clap_standby", False)
+        backend.mic_status_changed.emit(True, False, "Mic Active · Clap Standby")
+        assert "Dormant" in window.voice_bar.presence_pill.text()
+        assert "Off" in window.voice_bar.listening_pill.text()
+
         # Simulate active listening vs muted mic honesty
-        backend.mic_status_changed.emit(True, False, "Microphone Active")
+        backend.presence_state_changed.emit("ARMED", "double_clap", True)
+        backend.mic_status_changed.emit(True, False, "Mic Active · Armed")
         backend.assistant_state_changed.emit(AudioState.LISTENING.value, "turn-1")
         assert "Active Speech" in window.voice_bar.listening_pill.text()
 

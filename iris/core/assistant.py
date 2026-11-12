@@ -32,6 +32,12 @@ from iris.adapters.tts.base import TTSAdapter
 from iris.audio.capture import AudioCapture
 from iris.audio.echo_filter import EchoFilter
 from iris.audio.player import AudioPlayer
+from iris.audio.presence import (
+    PresenceCallback,
+    PresenceState,
+    VoicePresenceService,
+    is_deactivation_phrase,
+)
 from iris.audio.vad import VoiceActivityDetector
 from iris.core.config import IRISConfig, load_config
 from iris.core.security import sanitize_error_message
@@ -62,7 +68,9 @@ class IRISAssistant:
         context_manager: ContextManager | None = None,
         knowledge_service: KnowledgeService | None = None,
         memory_adapter: MemoryAdapter | None = None,
+        presence_service: VoicePresenceService | None = None,
         on_state_change: Callable[[AudioState, AudioState, str], None] | None = None,
+        on_presence_change: PresenceCallback | None = None,
         on_user_transcript: Callable[[str], None] | None = None,
         on_assistant_response: Callable[[str], None] | None = None,
         on_echo_detected: Callable[[str, str], None] | None = None,
@@ -95,14 +103,27 @@ class IRISAssistant:
 
         # Callbacks
         self.on_state_change = on_state_change
+        self.on_presence_change = on_presence_change
         self.on_user_transcript = on_user_transcript
         self.on_assistant_response = on_assistant_response
         self.on_echo_detected = on_echo_detected
         self.on_error = on_error
         self.on_silence_warning = on_silence_warning
 
-        # State Machine
+        # State Machine & Voice Presence
         self.state_machine = AudioStateMachine(on_change=self._handle_state_change)
+        if presence_service is not None:
+            self.presence = presence_service
+            self.presence.add_listener(self._handle_presence_change)
+        else:
+            self.presence = VoicePresenceService(
+                sample_rate=self.config.sample_rate,
+                clap_enabled=getattr(self.config, "clap_activation_enabled", True),
+                clap_sensitivity=getattr(self.config, "clap_sensitivity", 0.6),
+                active_timeout_s=getattr(self.config, "active_listening_timeout_s", 30.0),
+                activation_phrase=getattr(self.config, "activation_phrase", "hey iris"),
+                on_presence_change=self._handle_presence_change,
+            )
 
         # Audio Components
         self.player = getattr(self.tts, "_player", AudioPlayer())
@@ -151,6 +172,20 @@ class IRISAssistant:
             except Exception as exc:
                 logger.error("Error in on_state_change callback: %s", exc)
 
+    def _handle_presence_change(
+        self,
+        old_state: PresenceState,
+        new_state: PresenceState,
+        reason: str,
+    ) -> None:
+        if new_state in {PresenceState.DORMANT, PresenceState.DISABLED, PresenceState.ERROR}:
+            self.vad.reset()
+        if self.on_presence_change:
+            try:
+                self.on_presence_change(old_state, new_state, reason)
+            except Exception as exc:
+                logger.error("Error in on_presence_change callback: %s", exc)
+
     def _handle_silence_warning(self) -> None:
         if self.on_silence_warning:
             try:
@@ -170,7 +205,12 @@ class IRISAssistant:
             return len(turns)
         return 0
 
-    def start(self, capture_audio: bool = True, initial_context_refresh: bool = True) -> None:
+    def start(
+        self,
+        capture_audio: bool = True,
+        initial_context_refresh: bool = True,
+        start_dormant: bool = False,
+    ) -> None:
         """Start the assistant, context engine, and optional microphone audio capture."""
         if self._is_running:
             return
@@ -185,17 +225,28 @@ class IRISAssistant:
         from iris.adapters.stt.console_stt import ConsoleSTT
         if capture_audio and not isinstance(self.stt, ConsoleSTT):
             self.capture.unmute()
-            self.capture.start(on_frame=self._on_audio_frame)
+            try:
+                self.capture.start(on_frame=self._on_audio_frame)
+            except Exception as exc:
+                self.presence.set_error(sanitize_error_message(exc))
+                raise
+            if start_dormant:
+                self.presence.enable_dormant(reason="startup_dormant")
+            else:
+                self.presence.activate(source="startup")
+        else:
+            self.presence.disable(reason="capture_inactive")
         logger.info(
-            "IRIS assistant started (Model: %s, TTS: %s, STT: %s, mic_active=%s)",
+            "IRIS assistant started (Model: %s, TTS: %s, STT: %s, mic_active=%s, presence=%s)",
             self.model.__class__.__name__,
             self.tts.voice_name,
             self.stt.provider_name,
             self.capture.is_running,
+            self.presence.state.value,
         )
 
-    def enable_microphone(self) -> None:
-        """Activate microphone capture on demand when voice STT is configured."""
+    def _ensure_audio_capture_ready(self) -> None:
+        """Start local microphone hardware capture if not already active."""
         from iris.adapters.stt.console_stt import ConsoleSTT
 
         if isinstance(self.stt, ConsoleSTT):
@@ -204,13 +255,43 @@ class IRISAssistant:
             )
         if not self._is_running:
             self.start(capture_audio=False, initial_context_refresh=False)
-        self.capture.unmute()
-        self.capture.start(on_frame=self._on_audio_frame)
+        try:
+            self.capture.unmute()
+            self.capture.start(on_frame=self._on_audio_frame)
+        except Exception as exc:
+            self.presence.set_error(sanitize_error_message(exc))
+            raise
+
+    def enable_dormant_standby(self) -> None:
+        """
+        Keep local microphone open strictly for local double-clap standby detection.
+        No audio is transmitted to cloud STT or remote APIs in DORMANT mode.
+        """
+        self._ensure_audio_capture_ready()
+        self.vad.reset()
+        self.presence.enable_dormant(reason="manual_standby")
+
+    def activate_presence(self, source: str = "manual") -> None:
+        """Activate ARMED voice command listening cleanly."""
+        self._ensure_audio_capture_ready()
+        self.vad.reset()
+        self.presence.activate(source=source)
+
+    def deactivate_presence(self, reason: str = "manual") -> None:
+        """Return IRIS to DORMANT clap standby without shutting down local clap detection."""
+        self.vad.reset()
+        self.presence.deactivate(reason=reason)
+
+    def enable_microphone(self) -> None:
+        """Activate microphone capture and arm active voice listening."""
+        self.activate_presence(source="manual_mic_button")
 
     def disable_microphone(self) -> None:
-        """Deactivate microphone capture without tearing down the rest of IRIS."""
+        """Disable microphone capture completely, stopping all audio & clap detection."""
         self.capture.mute()
         self.capture.stop()
+        self.vad.reset()
+        self.presence.disable(reason="mic_disabled")
 
     def stop(self) -> None:
         """Stop audio processing and cleanly shut down."""
@@ -218,6 +299,7 @@ class IRISAssistant:
             return
 
         self._is_running = False
+        self.presence.shutdown()
         self.context_manager.stop()
         self.capture.stop()
         self.player.stop()
@@ -234,6 +316,7 @@ class IRISAssistant:
 
     def _on_speech_start(self) -> None:
         """Fired by VAD when user begins speaking."""
+        self.presence.on_user_speech_onset()
         if self.state_machine.state == AudioState.IDLE:
             self.state_machine.transition_to(AudioState.LISTENING)
 
@@ -246,12 +329,39 @@ class IRISAssistant:
         if self.capture.is_muted or not self.state_machine.is_mic_active:
             return
 
+        p_state = self.presence.state
+        if p_state in {PresenceState.DISABLED, PresenceState.ERROR, PresenceState.PROCESSING, PresenceState.SPEAKING}:
+            return
+
+        # STANDBY PRIVACY: While DORMANT, ONLY inspect locally for double-clap and discard immediately.
+        if p_state == PresenceState.DORMANT:
+            self.presence.process_audio_frame(
+                frame_bytes,
+                audio_state=self.state_machine.state,
+                vad_active=False,
+            )
+            return
+
+        # ARMED: Check for double-clap deactivation during quiet pauses (not while speaking)
+        if not self.vad.is_speaking and self.state_machine.state == AudioState.IDLE:
+            if (
+                self.presence.process_audio_frame(
+                    frame_bytes,
+                    audio_state=self.state_machine.state,
+                    vad_active=False,
+                )
+                == "deactivated"
+            ):
+                self.vad.reset()
+                return
+
         utterance = self.vad.process_frame(frame_bytes)
         if utterance:
             # End of user utterance detected!
             speech_end_time = time.perf_counter()
             turn_id = self.state_machine.new_turn()
             if self.state_machine.transition_to(AudioState.THINKING, expected_turn_id=turn_id):
+                self.presence.on_processing_started()
                 # Immediately mute microphone to eliminate any chance of feedback
                 self.capture.mute()
                 threading.Thread(
@@ -304,6 +414,24 @@ class IRISAssistant:
                     self._reset_to_idle()
                     return
 
+                # Check for deterministic Voice Deactivation phrase (no LLM invocation)
+                if is_deactivation_phrase(transcript):
+                    logger.info("Voice deactivation phrase detected [turn %s]: '%s'", turn_id[:8], transcript)
+                    if self.on_user_transcript:
+                        self.on_user_transcript(transcript)
+                    self.conversation.add_user_turn(transcript)
+                    self.archive.write_turn("user", transcript)
+                    ack = "Going to standby."
+                    self.conversation.add_assistant_turn(ack)
+                    self.archive.write_turn("assistant", ack)
+                    if self.on_assistant_response:
+                        self.on_assistant_response(ack)
+                    self.vad.reset()
+                    self.state_machine.transition_to(AudioState.IDLE)
+                    self.presence.deactivate(reason="voice_command")
+                    self.capture.unmute()
+                    return
+
                 # Valid user turn
                 if self.on_user_transcript:
                     self.on_user_transcript(transcript)
@@ -338,6 +466,7 @@ class IRISAssistant:
                     logger.warning("Turn cancelled before speech playback")
                     self._reset_to_idle()
                     return
+                self.presence.on_speaking_started()
 
                 def on_done() -> None:
                     self._on_playback_completed(turn_id)
@@ -458,14 +587,18 @@ class IRISAssistant:
         self.vad.reset()
         self.state_machine.transition_to(AudioState.IDLE, expected_turn_id=turn_id)
 
+        # Stay ARMED for multi-turn voice follow-ups unless explicitly deactivated
+        self.presence.on_speaking_finished(stay_armed=True)
+
         # Unmute microphone only after cooldown has elapsed
         self.capture.unmute()
-        logger.debug("Microphone unmuted. IRIS is now IDLE and listening.")
+        logger.debug("Microphone unmuted. IRIS is now IDLE (presence=%s).", self.presence.state.value)
 
     def _reset_to_idle(self) -> None:
-        """Safely reset state to IDLE and unmute microphone."""
+        """Safely reset state to IDLE, recover presence, and unmute microphone."""
         self.vad.reset()
         self.state_machine.transition_to(AudioState.IDLE)
+        self.presence.recover_from_turn()
         self.capture.unmute()
 
     def process_text_turn(
@@ -487,12 +620,29 @@ class IRISAssistant:
         turn_id = self.state_machine.new_turn()
         text_turn_start = time.perf_counter()
         self.state_machine.transition_to(AudioState.THINKING, expected_turn_id=turn_id)
+        self.presence.on_processing_started()
 
         transcript = text.strip()
         if self.on_user_transcript:
             self.on_user_transcript(transcript)
         self.conversation.add_user_turn(transcript)
         self.archive.write_turn("user", transcript)
+
+        # Deterministic presence phrases via text (never invokes an LLM)
+        presence_action = self.presence.try_handle_text_presence_command(transcript)
+        if presence_action is not None:
+            ack = (
+                "Voice listening activated."
+                if presence_action == "activated"
+                else "Going to standby."
+            )
+            self.conversation.add_assistant_turn(ack)
+            self.archive.write_turn("assistant", ack)
+            if self.on_assistant_response:
+                self.on_assistant_response(ack)
+            self.state_machine.transition_to(AudioState.IDLE)
+            self.capture.unmute()
+            return ack
 
         try:
             messages = self.conversation.get_messages()
@@ -517,6 +667,7 @@ class IRISAssistant:
             t_tts_start = time.perf_counter()
             if speak:
                 self.state_machine.transition_to(AudioState.SPEAKING, expected_turn_id=turn_id)
+                self.presence.on_speaking_started()
 
                 def on_done() -> None:
                     self._on_playback_completed(turn_id)

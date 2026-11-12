@@ -141,6 +141,14 @@ class IRISConfig:
     cooldown_ms: int = 400
     echo_similarity_threshold: float = 0.70
 
+    # Voice Presence & Double-Clap parameters (Phase 3)
+    voice_presence_enabled: bool = True
+    clap_activation_enabled: bool = True
+    clap_sensitivity: float = 0.6
+    active_listening_timeout_s: float = 30.0
+    activation_phrase: str = "hey iris"
+    presence_shortcut: str = "Ctrl+Shift+I"
+
     # Conversation archive & permanent Knowledge Vault
     archive_dir: Path = field(default_factory=lambda: Path("memory/conversations"))
     vault_dir: Path = field(default_factory=lambda: Path("vault"))
@@ -279,6 +287,12 @@ def load_config(
         silence_timeout_ms=_optional_int("IRIS_SILENCE_TIMEOUT_MS", 750),
         cooldown_ms=_optional_int("IRIS_COOLDOWN_MS", 400),
         echo_similarity_threshold=_optional_float("IRIS_ECHO_THRESHOLD", 0.70),
+        voice_presence_enabled=_optional_bool("IRIS_PRESENCE_ENABLED", True),
+        clap_activation_enabled=_optional_bool("IRIS_CLAP_ACTIVATION_ENABLED", True),
+        clap_sensitivity=max(0.1, min(1.0, _optional_float("IRIS_CLAP_SENSITIVITY", 0.6))),
+        active_listening_timeout_s=max(5.0, _optional_float("IRIS_ACTIVE_TIMEOUT_S", 30.0)),
+        activation_phrase=_optional("IRIS_ACTIVATION_PHRASE", "hey iris"),
+        presence_shortcut=_optional("IRIS_PRESENCE_SHORTCUT", "Ctrl+Shift+I"),
         archive_dir=archive_dir,
         vault_dir=vault_dir,
         knowledge_index_path=knowledge_index_path,

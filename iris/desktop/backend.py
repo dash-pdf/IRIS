@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
+from iris.audio.presence import PresenceState
 from iris.core.assistant import IRISAssistant
 from iris.core.config import IRISConfig, load_config
 from iris.core.policy import DEFAULT_LLM_POLICY, LLMUsagePolicy
@@ -71,6 +72,7 @@ class IRISDesktopBackend(QObject):
     assistant_error = Signal(str)
 
     mic_status_changed = Signal(bool, bool, str)  # (is_running, is_muted, status_text)
+    presence_state_changed = Signal(str, str, bool)  # (presence_state, reason, stt_listening_enabled)
     silence_warning_received = Signal()
     echo_detected_received = Signal(str, str)
 
@@ -106,6 +108,7 @@ class IRISDesktopBackend(QObject):
                 on_echo_detected=self._on_echo_detected,
                 on_error=self._on_assistant_error,
                 on_silence_warning=self._on_silence_warning,
+                on_presence_change=self._on_presence_change,
             )
 
         self.knowledge_service: KnowledgeService = self.assistant.knowledge_service
@@ -127,6 +130,7 @@ class IRISDesktopBackend(QObject):
             self.assistant_error.emit(safe_msg)
 
         self.emit_mic_status()
+        self.emit_presence_status()
         self.context_updated.emit(self.context_manager.get_context())
 
         if refresh_context_async:
@@ -161,6 +165,7 @@ class IRISDesktopBackend(QObject):
         self.assistant.on_echo_detected = self._on_echo_detected
         self.assistant.on_error = self._on_assistant_error
         self.assistant.on_silence_warning = self._on_silence_warning
+        self.assistant.on_presence_change = self._on_presence_change
 
     def _safe_emit(self, signal: Signal, *args: Any) -> None:
         if self._shutting_down:
@@ -191,6 +196,20 @@ class IRISDesktopBackend(QObject):
 
     def _on_silence_warning(self) -> None:
         self._safe_emit(self.silence_warning_received)
+
+    def _on_presence_change(
+        self,
+        _old: PresenceState,
+        new_state: PresenceState,
+        reason: str,
+    ) -> None:
+        self.emit_mic_status()
+        self._safe_emit(
+            self.presence_state_changed,
+            new_state.value,
+            reason,
+            self.assistant.presence.is_stt_allowed,
+        )
 
     # ── Worker Spawning ───────────────────────────────────────────────────────
 
@@ -260,39 +279,104 @@ class IRISDesktopBackend(QObject):
             if m.get("role") in {"user", "assistant"} and m.get("content", "").strip()
         ]
 
-    # ── Microphone Controls (Strict Honest Status) ────────────────────────────
+    # ── Microphone & Voice Presence Controls (Strict Honest Status) ───────────
 
     def current_mic_status(self) -> tuple[bool, bool, str]:
         """Return (is_running, is_muted, human_status_label)."""
         running = self.assistant.capture.is_running
         muted = self.assistant.capture.is_muted
-        if not running:
+        p_state = self.assistant.presence.state
+        if p_state == PresenceState.ERROR:
+            return running, muted, "Microphone Error"
+        if not running or p_state == PresenceState.DISABLED:
             return False, muted, "Microphone Inactive"
-        if muted:
+        if p_state == PresenceState.DORMANT:
+            return True, False, "Mic Active · Clap Standby"
+        if muted or p_state in (PresenceState.PROCESSING, PresenceState.SPEAKING):
             return True, True, "Mic Muted (Half-Duplex)"
-        return True, False, "Microphone Active"
+        return True, False, "Mic Active · Armed"
+
+    def current_presence_status(self) -> tuple[str, str, bool]:
+        """Return (presence_state_value, reason, stt_listening_enabled)."""
+        presence = self.assistant.presence
+        return presence.state.value, presence.last_reason, presence.is_stt_allowed
 
     def emit_mic_status(self) -> None:
         running, muted, label = self.current_mic_status()
         self._safe_emit(self.mic_status_changed, running, muted, label)
 
+    def emit_presence_status(self) -> None:
+        state_val, reason, stt_enabled = self.current_presence_status()
+        self._safe_emit(self.presence_state_changed, state_val, reason, stt_enabled)
+
+    def _after_presence_action(self) -> None:
+        self.emit_mic_status()
+        self.emit_presence_status()
+
     def toggle_microphone(self) -> None:
         """Safely start or stop existing voice capture off the GUI thread."""
         if self.assistant.capture.is_running:
-            self._submit_worker(
-                self.assistant.disable_microphone,
-                on_success=lambda _: self.emit_mic_status(),
-                on_error=self._handle_mic_error,
-            )
+            self.disable_microphone()
         else:
-            self._submit_worker(
-                self.assistant.enable_microphone,
-                on_success=lambda _: self.emit_mic_status(),
-                on_error=self._handle_mic_error,
-            )
+            self.activate_listening()
+
+    def enable_dormant_standby(self) -> None:
+        """Enter DORMANT local double-clap standby off the GUI thread."""
+        self._submit_worker(
+            self.assistant.enable_dormant_standby,
+            on_success=lambda _: self._after_presence_action(),
+            on_error=self._handle_mic_error,
+        )
+
+    def activate_listening(self) -> None:
+        """Manually arm active listening off the GUI thread."""
+        self._submit_worker(
+            lambda: self.assistant.activate_presence(source="manual"),
+            on_success=lambda _: self._after_presence_action(),
+            on_error=self._handle_mic_error,
+        )
+
+    def deactivate_to_dormant(self) -> None:
+        """Return active listening to DORMANT clap standby."""
+        self._submit_worker(
+            lambda: self.assistant.deactivate_presence(reason="manual"),
+            on_success=lambda _: self._after_presence_action(),
+            on_error=self._handle_mic_error,
+        )
+
+    def disable_microphone(self) -> None:
+        """Completely stop microphone capture including local clap standby."""
+        self._submit_worker(
+            self.assistant.disable_microphone,
+            on_success=lambda _: self._after_presence_action(),
+            on_error=self._handle_mic_error,
+        )
+
+    def toggle_armed_or_dormant(self) -> None:
+        """Toggle between Armed command listening and Dormant standby (or arm from Disabled)."""
+        if self.assistant.presence.state == PresenceState.ARMED:
+            self.deactivate_to_dormant()
+        else:
+            self.activate_listening()
+
+    def set_clap_activation_enabled(self, enabled: bool) -> None:
+        self.assistant.presence.set_clap_enabled(enabled)
+        self.emit_presence_status()
+
+    def set_clap_sensitivity(self, sensitivity: float) -> None:
+        self.assistant.presence.set_sensitivity(sensitivity)
+        self.emit_presence_status()
+
+    def set_active_timeout_s(self, timeout_s: float) -> None:
+        self.assistant.presence.set_active_timeout(timeout_s)
+        self.emit_presence_status()
+
+    def set_activation_phrase(self, phrase: str) -> None:
+        self.assistant.presence.set_activation_phrase(phrase)
+        self.emit_presence_status()
 
     def _handle_mic_error(self, safe_err: str) -> None:
-        self.emit_mic_status()
+        self._after_presence_action()
         self._safe_emit(self.assistant_error, f"Voice capture error: {safe_err}")
 
     # ── Context Engine ────────────────────────────────────────────────────────
@@ -454,6 +538,12 @@ class IRISDesktopBackend(QObject):
             "archive_dir": str(self.config.archive_dir),
             "knowledge_index_path": str(self.config.knowledge_index_path),
             "speak_text_replies": self._speak_text_replies,
+            "presence_state": self.assistant.presence.state.value,
+            "clap_activation_enabled": self.assistant.presence.clap_enabled,
+            "clap_sensitivity": self.assistant.presence.clap_sensitivity,
+            "active_listening_timeout_s": self.assistant.presence.active_timeout_s,
+            "activation_phrase": self.assistant.presence.activation_phrase,
+            "presence_shortcut": self.config.presence_shortcut,
             "providers_configured": {
                 "OpenRouter": self._has_configured_secret(self.config.openrouter_api_key),
                 "Google Gemini": self._has_configured_secret(self.config.google_api_key),

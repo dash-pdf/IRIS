@@ -9,15 +9,17 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QHeaderView,
 )
 
 from iris.desktop.backend import IRISDesktopBackend
@@ -114,6 +116,84 @@ class SettingsPage(QWidget):
 
         root.addWidget(cfg_card)
 
+        # Voice Presence & Double-Clap Card
+        presence_card = QFrame()
+        presence_card.setObjectName("SurfaceCard")
+        presence_layout = QVBoxLayout(presence_card)
+        presence_layout.setContentsMargins(16, 14, 16, 14)
+        presence_layout.setSpacing(8)
+
+        presence_hdr = QLabel("VOICE PRESENCE & DOUBLE-CLAP")
+        presence_hdr.setObjectName("SectionHeader")
+        presence_layout.addWidget(presence_hdr)
+
+        self.presence_privacy_label = QLabel(
+            "When dormant, microphone audio stays strictly local for clap detection—zero cloud STT, "
+            "zero LLM calls, and zero audio buffers retained. Disable Microphone stops all capture."
+        )
+        self.presence_privacy_label.setWordWrap(True)
+        self.presence_privacy_label.setObjectName("MutedLabel")
+        presence_layout.addWidget(self.presence_privacy_label)
+
+        clap_row = QHBoxLayout()
+        self.clap_enabled_checkbox = QCheckBox("Enable local double-clap activation/deactivation")
+        self.clap_enabled_checkbox.setChecked(self._backend.assistant.presence.clap_enabled)
+        self.clap_enabled_checkbox.toggled.connect(self._backend.set_clap_activation_enabled)
+
+        self.standby_btn = QPushButton("Enable Clap Standby")
+        self.standby_btn.clicked.connect(self._backend.enable_dormant_standby)
+
+        self.mic_disable_btn = QPushButton("Disable Microphone Completely")
+        self.mic_disable_btn.clicked.connect(self._backend.disable_microphone)
+
+        clap_row.addWidget(self.clap_enabled_checkbox)
+        clap_row.addStretch()
+        clap_row.addWidget(self.standby_btn)
+        clap_row.addWidget(self.mic_disable_btn)
+        presence_layout.addLayout(clap_row)
+
+        tuning_row = QHBoxLayout()
+        tuning_row.addWidget(QLabel("Clap Sensitivity (0.1–1.0):"))
+        self.sensitivity_spin = QDoubleSpinBox()
+        self.sensitivity_spin.setRange(0.10, 1.00)
+        self.sensitivity_spin.setSingleStep(0.05)
+        self.sensitivity_spin.setDecimals(2)
+        self.sensitivity_spin.setValue(self._backend.assistant.presence.clap_sensitivity)
+        self.sensitivity_spin.valueChanged.connect(self._backend.set_clap_sensitivity)
+        tuning_row.addWidget(self.sensitivity_spin)
+
+        tuning_row.addSpacing(12)
+        tuning_row.addWidget(QLabel("Active Timeout:"))
+        self.timeout_spin = QDoubleSpinBox()
+        self.timeout_spin.setRange(5.0, 300.0)
+        self.timeout_spin.setSingleStep(5.0)
+        self.timeout_spin.setDecimals(0)
+        self.timeout_spin.setSuffix(" s")
+        self.timeout_spin.setValue(self._backend.assistant.presence.active_timeout_s)
+        self.timeout_spin.valueChanged.connect(self._backend.set_active_timeout_s)
+        tuning_row.addWidget(self.timeout_spin)
+
+        tuning_row.addSpacing(12)
+        self.presence_shortcut_label = QLabel(f"Shortcut: {self._backend.config.presence_shortcut}")
+        self.presence_shortcut_label.setObjectName("MutedLabel")
+        tuning_row.addWidget(self.presence_shortcut_label)
+        tuning_row.addStretch()
+        presence_layout.addLayout(tuning_row)
+
+        phrase_row = QHBoxLayout()
+        phrase_row.addWidget(QLabel("Optional Activation Phrase:"))
+        self.activation_phrase_input = QLineEdit(self._backend.assistant.presence.activation_phrase)
+        self.activation_phrase_input.setPlaceholderText("e.g. hey iris")
+        self.apply_phrase_btn = QPushButton("Apply Phrase")
+        self.apply_phrase_btn.clicked.connect(
+            lambda: self._backend.set_activation_phrase(self.activation_phrase_input.text())
+        )
+        phrase_row.addWidget(self.activation_phrase_input, stretch=1)
+        phrase_row.addWidget(self.apply_phrase_btn)
+        presence_layout.addLayout(phrase_row)
+
+        root.addWidget(presence_card)
+
         # LLM Usage Policy Matrix
         policy_card = QFrame()
         policy_card.setObjectName("SurfaceCard")
@@ -154,11 +234,28 @@ class SettingsPage(QWidget):
         self.summary_label.setText(
             f"Intelligence Provider: {info['llm_provider']} ({info['llm_model_name']})\n"
             f"TTS Provider: {info['tts_provider']}   |   STT Provider: {info['stt_provider']}\n"
+            f"Voice Presence: {info['presence_state']}   |   "
+            f"Clap Standby: {'Enabled' if info['clap_activation_enabled'] else 'Disabled'}\n"
             f"Knowledge Vault: {info['vault_dir']}\n"
             f"SQLite FTS5 Index: {info['knowledge_index_path']}\n"
             f"Session Archives: {info['archive_dir']}\n"
             f"Credentials Status: {provider_badges}"
         )
+
+        self.clap_enabled_checkbox.blockSignals(True)
+        self.clap_enabled_checkbox.setChecked(bool(info["clap_activation_enabled"]))
+        self.clap_enabled_checkbox.blockSignals(False)
+
+        self.sensitivity_spin.blockSignals(True)
+        self.sensitivity_spin.setValue(float(info["clap_sensitivity"]))
+        self.sensitivity_spin.blockSignals(False)
+
+        self.timeout_spin.blockSignals(True)
+        self.timeout_spin.setValue(float(info["active_listening_timeout_s"]))
+        self.timeout_spin.blockSignals(False)
+
+        if not self.activation_phrase_input.hasFocus():
+            self.activation_phrase_input.setText(str(info["activation_phrase"]))
 
         caps = self._backend.policy.list_capabilities()
         self.policy_table.setRowCount(len(caps))

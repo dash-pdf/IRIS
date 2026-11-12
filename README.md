@@ -8,6 +8,12 @@
 
 ### 1. Voice & Runtime Pipeline (`iris/core/`, `iris/audio/`, `iris/adapters/`)
 - **Half-Duplex Orchestrator (`iris/core/assistant.py`, `iris/core/state.py`)**: Manages explicit state transitions (`IDLE -> LISTENING -> THINKING -> SPEAKING -> COOLDOWN -> IDLE`), thread-safe cancellation, and turn timing metrics.
+- **Voice Presence & Double-Clap Activation (`iris/audio/presence.py`)**:
+  - Dedicated state machine (`DISABLED`, `DORMANT`, `ARMED`, `PROCESSING`, `SPEAKING`, `ERROR`) coordinated with `AudioStateMachine`.
+  - **Local `DoubleClapDetector`**: Sub-frame high-pass energy ratio, impulse duration limits, inter-clap timing bounds (`140ms–850ms`), noise-floor adaptation, and `1.5s` cooldown hysteresis so room reverb, desk thuds, typing, and continuous speech/music do not falsely trigger.
+  - **Standby Privacy Guarantee**: While `DORMANT`, microphone audio goes strictly to the local transient clap detector — zero bytes are forwarded to VAD, ElevenLabs STT, or any LLM, and zero raw PCM buffers are retained across frames. Calling **Disable Mic** (`DISABLED`) halts microphone capture completely.
+  - **Hands-Free Multi-Turn & Deactivation**: Double-clapping (or optional `"hey iris"` activation phrase) moves IRIS from `DORMANT` to `ARMED`, allowing consecutive voice commands without repeating a wake phrase until another double-clap (during quiet pauses), deterministic deactivation phrase (`"Stop listening."`, `"Go to standby."`, `"Deactivate listening."`, `"That's all."`), manual standby/disable button, shortcut (`Ctrl+Shift+I`), or configurable inactivity timeout returns IRIS to `DORMANT`.
+  - **TTS & Media Suppression**: Clap detection is suppressed while `SPEAKING`, during post-TTS acoustic decay guard, and via external audio playback gating hooks.
 - **Audio I/O & Echo Defense (`iris/audio/`)**: `sounddevice` microphone capture (`capture.py`), energy-based Voice Activity Detection (`vad.py`), transcript echo filtering (`echo_filter.py`), and interruptible playback (`player.py`).
 - **Speech-to-Text (`iris/adapters/stt/`)**: ElevenLabs Scribe adapter (`elevenlabs_stt.py`), console text input (`console_stt.py`), and mock test adapter (`mock_stt.py`).
 - **Text-to-Speech (`iris/adapters/tts/`)**: Edge TTS primary provider (`edge_tts.py`, `edge-tts>=7.3.1,<8.0.0`, default `en-GB-SoniaNeural`) with automatic fallback to native macOS `say` (`macos_tts.py`), plus optional ElevenLabs, Kokoro, and mock adapters.
@@ -56,7 +62,7 @@ memory/
   - **Left Sidebar (`widgets/sidebar.py`)**: Navigation for `Home`, `Knowledge`, `Research` *(Planned)*, `Calendar` *(Planned)*, `Tasks` *(Planned)*, `Music` *(Planned)*, and `Settings`, alongside the live Markdown Vault folder tree (`Inbox`, `Notes`, `Projects`, `Research`, `Archive`).
   - **Centre Workspace (`widgets/home_page.py`, `knowledge_page.py`, `research_page.py`, `placeholders.py`)**: Live Home dashboard (weather/location context, Inbox count, recent notes, quick deterministic search & capture), tabbed Knowledge Vault Markdown editor/previewer & Inbox triage connected to `KnowledgeService`, modular Research & Video Intelligence Phase 4 container, clearly marked placeholders, and redacted non-secret Settings view.
   - **Right Assistant Panel (`widgets/assistant_panel.py`)**: Active session history, message composer, processing indicator, and secret-redacted error banner wired through `IRISDesktopBackend` (`QThreadPool` + Qt Signals) to `IRISAssistant`.
-  - **Persistent Bottom Voice Control Bar (`widgets/voice_bar.py`)**: Microphone toggle with honest active/muted/inactive status, listening indicator (never shown active when mic is off), assistant activity state, and accessible quick text command input.
+  - **Persistent Bottom Voice Control Bar (`widgets/voice_bar.py`)**: Explicit presence status (`Disabled`, `Dormant (Clap Standby)`, `Armed (Listening)`, `Processing`, `Speaking`, `Error`), honest listening indicator (never active when `DISABLED` or `DORMANT`), manual `Standby` / `Arm` / `Disable Mic` actions, `Ctrl+Shift+I` toggle shortcut, and quick text command input, paired with presence configuration (clap toggle, sensitivity `0.1–1.0`, active timeout, optional activation phrase) in `Settings`.
 
 ### 6. Application-Wide LLM Usage Policy & Research Compatibility (`iris/core/policy.py`, `iris/services/research/`)
 - **Deterministic First (`LLMUsagePolicy`)**: Ordinary operations (Markdown note CRUD, folder moves, Inbox persistence, SQLite FTS5 search, math, date/time, context retrieval) run offline in Python/SQLite with zero LLM calls; AI reasoning flows exclusively through `IRISAssistant` and `ModelAdapter`.
@@ -83,16 +89,18 @@ memory/
    - `IRIS_VAULT_DIR=vault`
    - `IRIS_KNOWLEDGE_INDEX_PATH=memory/index/knowledge.db`
    - `IRIS_ARCHIVE_DIR=memory/conversations`
+   - Voice Presence controls (`IRIS_PRESENCE_ENABLED`, `IRIS_CLAP_ACTIVATION_ENABLED`, `IRIS_CLAP_SENSITIVITY`, `IRIS_ACTIVE_TIMEOUT_S`, `IRIS_ACTIVATION_PHRASE`, `IRIS_PRESENCE_SHORTCUT`)
    - Provider keys (`ELEVENLABS_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, etc.) and optional manual location settings (`IRIS_LOCATION_LAT`, `IRIS_LOCATION_LON`, `IRIS_LOCATION_LABEL`).
 
 ### Launching IRIS
-- PySide6 Desktop Application (Phase 2):
+- PySide6 Desktop Application (with Voice Presence & Knowledge Vault):
   ```bash
   ./run.sh --desktop
   ```
-- Full CLI voice assistant launcher:
+- Full CLI voice assistant launcher (add `--dormant` for local double-clap standby startup):
   ```bash
   ./run.sh
+  .venv/bin/python iris_voice.py --dormant
   ```
 - Text mode or provider overrides via `iris_voice.py`:
   ```bash
@@ -101,7 +109,7 @@ memory/
   ```
 
 ### Running Tests
-Run the full automated test suite (**274 tests** across 18 test modules):
+Run the full automated test suite (**283 tests** across 19 test modules):
 ```bash
 .venv/bin/pytest tests/
 ```
@@ -109,8 +117,7 @@ Run the full automated test suite (**274 tests** across 18 test modules):
 ---
 
 ## Roadmap / Upcoming Phases (Not Yet Implemented)
-The following planned features remain outside the current Phase 2 implementation:
-- **Phase 3 — Voice Presence System**: Double-clap hands-free activation and always-ready acoustic triggers
+The following planned features remain outside the current Phase 3 implementation:
 - **Phase 4 — Research Engine & Mandatory Video Intelligence**: Embedded multi-tab research browser, webpage extraction, and full Video Intelligence (lecture/video discovery, caption/transcript retrieval, audio transcription when permitted, timestamped concept analysis, study notes, comparison, and revision flashcards)
 - Google Calendar, Tasks, and Spotify integrations
 - Proactive background reminders and notifications
