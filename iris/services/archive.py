@@ -148,18 +148,26 @@ class ConversationArchive:
             self._require_open()
             label = self._speaker_labels.get(role, role.capitalize())
             timestamp = _now_str()
-            entry = f"### [{timestamp}] {label}\n{text.strip()}\n\n"
+            if role == "error":
+                from iris.core.security import sanitize_sensitive_text
+
+                clean_text = sanitize_sensitive_text(text.strip())
+            else:
+                clean_text = text.strip()
+            entry = f"### [{timestamp}] {label}\n{clean_text}\n\n"
             self._append(entry)
 
     def write_error(self, message: str) -> None:
         """
-        Record an error turn. Use this when a downstream service fails.
+        Record a sanitised error turn. Use this when a downstream service fails.
 
-        The message must NOT contain API keys, tokens, or any secret.
-        The caller is responsible for sanitising the message before passing
-        it here.
+        Credential-like values, tokens, and sensitive URL query parameters are
+        automatically redacted before writing to disk.
         """
-        self.write_turn("error", f"⚠️ {message}")
+        from iris.core.security import sanitize_sensitive_text
+
+        sanitised = sanitize_sensitive_text(message)
+        self.write_turn("error", f"⚠️ {sanitised}")
 
     # ── Properties ────────────────────────────────────────────────────────
 

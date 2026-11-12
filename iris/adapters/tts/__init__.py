@@ -12,7 +12,7 @@ from iris.adapters.tts.base import TTSAdapter, shape_speech_text
 from iris.adapters.tts.edge_tts import EdgeTTS
 from iris.adapters.tts.elevenlabs_tts import ElevenLabsTTS
 from iris.adapters.tts.kokoro_tts import KokoroTTS
-from iris.adapters.tts.macos_tts import MacOSSayTTS
+from iris.adapters.tts.macos_tts import MacOSSayTTS, MacOSTTS
 from iris.adapters.tts.mock_tts import MockTTS
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ def create_tts_adapter(config: IRISConfig) -> TTSAdapter:
     elif provider == "edge":
         return EdgeTTS(
             voice_name=getattr(config, "edge_voice", "en-GB-SoniaNeural"),
+            fallback_voice=getattr(config, "macos_voice", "Flo (English (UK))"),
         )
     elif provider == "macos":
         # Calculate speaking rate (macOS say default rate ~175-185 wpm)
@@ -59,6 +60,7 @@ __all__ = [
     "KokoroTTS",
     "EdgeTTS",
     "MacOSSayTTS",
+    "MacOSTTS",
     "ElevenLabsTTS",
     "MockTTS",
     "create_tts_adapter",

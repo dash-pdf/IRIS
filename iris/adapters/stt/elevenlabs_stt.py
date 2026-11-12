@@ -15,6 +15,7 @@ import wave
 from typing import Any
 
 from iris.adapters.stt.base import STTAdapter
+from iris.core.security import sanitize_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class ElevenLabsSTT(STTAdapter):
             text = getattr(result, "text", "") or ""
             return text.strip()
         except Exception as exc:
-            logger.error("ElevenLabs STT transcription failed: %s", exc)
-            raise RuntimeError(f"ElevenLabs STT transcription error: {exc}") from exc
+            safe_exc = sanitize_sensitive_text(str(exc))
+            logger.error("ElevenLabs STT transcription failed: %s", safe_exc)
+            raise RuntimeError(f"ElevenLabs STT transcription error: {safe_exc}") from exc
 

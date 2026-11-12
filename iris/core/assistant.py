@@ -33,6 +33,7 @@ from iris.audio.echo_filter import EchoFilter
 from iris.audio.player import AudioPlayer
 from iris.audio.vad import VoiceActivityDetector
 from iris.core.config import IRISConfig, load_config
+from iris.core.security import sanitize_error_message
 from iris.core.state import AudioState, AudioStateMachine
 from iris.services.archive import ConversationArchive
 from iris.services.context import ContextManager
@@ -402,9 +403,10 @@ class IRISAssistant:
                 )
 
             except Exception as exc:
-                logger.error("Error during utterance processing [turn %s]: %s", turn_id[:8], exc)
+                safe_err = sanitize_error_message(exc)
+                logger.error("Error during utterance processing [turn %s]: %s", turn_id[:8], safe_err)
                 try:
-                    self.archive.write_turn("error", str(exc))
+                    self.archive.write_error(safe_err)
                 except Exception:
                     pass
                 if self.on_error:
@@ -568,7 +570,12 @@ class IRISAssistant:
 
             return response_text
         except Exception as exc:
-            logger.error("Error during text turn processing [turn %s]: %s", turn_id[:8], exc)
+            safe_err = sanitize_error_message(exc)
+            logger.error("Error during text turn processing [turn %s]: %s", turn_id[:8], safe_err)
+            try:
+                self.archive.write_error(safe_err)
+            except Exception:
+                pass
             self._reset_to_idle()
             raise
 

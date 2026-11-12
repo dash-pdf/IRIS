@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from iris.adapters.model.base import ModelAdapter
+from iris.core.security import sanitize_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -142,14 +143,14 @@ class GeminiModelAdapter(ModelAdapter):
             text = response.text or ""
             return text.strip() or "Understood."
         except Exception as exc:
-            err_str = str(exc)
+            err_str = sanitize_sensitive_text(str(exc))
             if any(code in err_str.lower() for code in ["429", "resource_exhausted", "quota", "rate limit"]):
-                logger.warning("Gemini Developer API quota reached: %s", exc)
+                logger.warning("Gemini Developer API quota reached: %s", err_str)
                 raise GeminiQuotaExceededError(
                     f"Gemini Developer API free-tier quota or rate limit exceeded for '{self.model_name}'."
                 ) from exc
-            logger.error("Gemini API call failed: %s", exc)
-            raise RuntimeError(f"Gemini generation error: {exc}") from exc
+            logger.error("Gemini API call failed: %s", err_str)
+            raise RuntimeError(f"Gemini generation error: {err_str}") from exc
 
 
 # Alias for backwards compatibility and nomenclature alignment

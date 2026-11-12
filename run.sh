@@ -34,5 +34,14 @@ if [ ! -f "$SCRIPT_DIR/.env" ]; then
     fi
 fi
 
-# 3. Launch IRIS forwarding all command-line arguments
+# 3. Ensure native macOS Location Helper is built if on macOS
+if [ ! -f "$SCRIPT_DIR/bin/IrisLocationHelper.app/Contents/MacOS/IrisLocationHelper" ] && [ "$(uname)" = "Darwin" ]; then
+    if command -v swiftc >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/native/location_helper/build.sh" ]; then
+        "$SCRIPT_DIR/native/location_helper/build.sh" >/dev/null 2>&1 || true
+    fi
+fi
+
+# 4. Launch IRIS forwarding all command-line arguments
 exec "$VENV_PYTHON" "$SCRIPT_DIR/iris_voice.py" "$@"
+
+

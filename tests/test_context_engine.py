@@ -152,33 +152,67 @@ class TestLocationService:
         assert loc.name == "Edinburgh, UK"
         assert loc.latitude == 55.9533
         assert loc.longitude == -3.1883
-        assert loc.source == "manual_fallback"
+        assert loc.source == "manual_config"
         assert loc.is_fallback is True
+        # Fallbacks must never be saved to persistent disk cache
+        assert not (tmp_path / "location_cache.json").exists()
 
-    def test_cache_persistence_and_loading(self, tmp_path: Path) -> None:
-        service1 = LocationService(
-            cache_dir=tmp_path,
-            enable_tracking=False,
-            fallback_name="Manchester, UK",
-            fallback_latitude=53.4808,
-            fallback_longitude=-2.2426,
+    def test_cache_persistence_and_loading_authentic_only(self, tmp_path: Path) -> None:
+        service1 = LocationService(cache_dir=tmp_path, enable_tracking=True)
+        authentic_loc = LocationInfo(
+            name="Freiburg, Germany",
+            latitude=47.9990,
+            longitude=7.8421,
+            accuracy_m=20.0,
+            source="macos_native",
+            is_fallback=False,
         )
-        loc1 = service1.get_location()
+        service1._save_cache(authentic_loc)
         assert (tmp_path / "location_cache.json").exists()
 
-        # Instantiate second service without fallbacks; should read from disk cache
+        # Instantiate second service without tracking; reads authentic location from disk cache
         service2 = LocationService(cache_dir=tmp_path, enable_tracking=False)
         loc2 = service2.get_location()
-        assert loc2.name == "Manchester, UK"
-        assert loc2.latitude == 53.4808
+        assert loc2.name == "Freiburg, Germany"
+        assert loc2.latitude == 47.9990
         assert loc2.source == "cached"
+        assert loc2.is_fallback is False
+
+    def test_fallback_never_persists_to_cache(self, tmp_path: Path) -> None:
+        service = LocationService(cache_dir=tmp_path, enable_tracking=False)
+        fallback_loc = LocationInfo(
+            name="Synthetic City",
+            latitude=10.0,
+            longitude=20.0,
+            source="default_fallback",
+            is_fallback=True,
+        )
+        service._save_cache(fallback_loc)
+        assert not (tmp_path / "location_cache.json").exists()
+
+    def test_cached_fallback_on_disk_is_ignored(self, tmp_path: Path) -> None:
+        # Pre-seed disk cache with a legacy fallback
+        cache_file = tmp_path / "location_cache.json"
+        cache_file.write_text(json.dumps({
+            "name": "Berlin, Germany",
+            "source": "default_fallback",
+            "is_fallback": True,
+            "latitude": 52.52,
+            "longitude": 13.405,
+        }))
+
+        service = LocationService(cache_dir=tmp_path, enable_tracking=False, fallback_name="Override City")
+        loc = service.get_location(force_refresh=False)
+        # Should ignore the cached fallback and use configured fallback
+        assert loc.name == "Override City"
+        assert loc.source == "manual_config"
 
     def test_privacy_guarantee_no_coordinates_in_repr_or_safe_export(self) -> None:
         loc = LocationInfo(
             name="London, UK",
             latitude=51.5074,
             longitude=-0.1278,
-            source="macos_corelocation",
+            source="macos_native",
         )
         repr_str = repr(loc)
         assert "51.5074" not in repr_str
@@ -191,6 +225,96 @@ class TestLocationService:
         assert "longitude" not in safe_dict
         assert safe_dict["name"] == "London, UK"
 
+    def test_native_swift_helper_success(self, tmp_path: Path) -> None:
+        service = LocationService(cache_dir=tmp_path, enable_tracking=True)
+        mock_output = json.dumps({
+            "status": "success",
+            "latitude": 48.0609,
+            "longitude": 8.5358,
+            "accuracy_m": 35.0,
+            "city": "Villingen-Schwenningen, Germany",
+            "source": "macos_native",
+        })
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=mock_output, returncode=0)
+            with patch.object(Path, "is_file", return_value=True), patch("os.access", return_value=True):
+                loc = service.get_location(force_refresh=True)
+
+        assert loc.name == "Villingen-Schwenningen, Germany"
+        assert loc.latitude == 48.0609
+        assert loc.longitude == 8.5358
+        assert loc.accuracy_m == 35.0
+        assert loc.source == "macos_native"
+        assert loc.is_fallback is False
+        # Authentic location is cached
+        assert (tmp_path / "location_cache.json").exists()
+
+    def test_native_swift_helper_denied(self, tmp_path: Path) -> None:
+        service = LocationService(
+            cache_dir=tmp_path,
+            enable_tracking=True,
+            fallback_name="Fallback City",
+        )
+        mock_output = json.dumps({
+            "status": "denied",
+            "error": "Location permission denied by user",
+        })
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=mock_output, returncode=0)
+            with patch.object(Path, "is_file", return_value=True), patch("os.access", return_value=True):
+                with patch.object(service, "_try_macos_corelocation", return_value=None):
+                    loc = service.get_location(force_refresh=True)
+
+        assert loc.name == "Fallback City"
+        assert loc.is_fallback is True
+        assert service._permission_denied is True
+        assert not (tmp_path / "location_cache.json").exists()
+
+    def test_native_swift_helper_timeout(self, tmp_path: Path) -> None:
+        service = LocationService(
+            cache_dir=tmp_path,
+            enable_tracking=True,
+            fallback_name="Timeout City",
+        )
+        mock_output = json.dumps({
+            "status": "timeout",
+            "error": "Location request timed out",
+        })
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=mock_output, returncode=0)
+            with patch.object(Path, "is_file", return_value=True), patch("os.access", return_value=True):
+                with patch.object(service, "_try_macos_corelocation", return_value=None):
+                    loc = service.get_location(force_refresh=True)
+
+        assert loc.name == "Timeout City"
+        assert loc.is_fallback is True
+
+    def test_native_swift_helper_invalid_coordinates(self, tmp_path: Path) -> None:
+        service = LocationService(
+            cache_dir=tmp_path,
+            enable_tracking=True,
+            fallback_name="Valid City",
+        )
+        mock_output = json.dumps({
+            "status": "success",
+            "latitude": 999.0,  # Invalid
+            "longitude": -999.0,  # Invalid
+            "accuracy_m": 10.0,
+            "city": "Nowhere",
+        })
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout=mock_output, returncode=0)
+            with patch.object(Path, "is_file", return_value=True), patch("os.access", return_value=True):
+                with patch.object(service, "_try_macos_corelocation", return_value=None):
+                    loc = service.get_location(force_refresh=True)
+
+        assert loc.name == "Valid City"
+        assert loc.is_fallback is True
+
     def test_macos_corelocation_denied_falls_back_gracefully(self, tmp_path: Path) -> None:
         service = LocationService(
             cache_dir=tmp_path,
@@ -199,12 +323,12 @@ class TestLocationService:
             fallback_latitude=10.0,
             fallback_longitude=20.0,
         )
-        # Mock CoreLocation returning None (denied or not determined)
-        with patch.object(service, "_try_macos_corelocation", return_value=None):
-            loc = service.get_location()
-            assert loc.name == "Fallback City"
-            assert loc.latitude == 10.0
-            assert loc.is_fallback is True
+        with patch.object(service, "_try_native_swift_helper", return_value=None):
+            with patch.object(service, "_try_macos_corelocation", return_value=None):
+                loc = service.get_location()
+                assert loc.name == "Fallback City"
+                assert loc.latitude == 10.0
+                assert loc.is_fallback is True
 
     def test_macos_corelocation_authorized_success(self, tmp_path: Path) -> None:
         service = LocationService(cache_dir=tmp_path, enable_tracking=True)
@@ -216,13 +340,26 @@ class TestLocationService:
             source="macos_corelocation",
             is_fallback=False,
         )
-        with patch.object(service, "_try_macos_corelocation", return_value=mock_loc):
-            loc = service.get_location()
-            assert loc.name == "Cupertino, CA"
-            assert loc.latitude == 37.3230
-            assert loc.accuracy_m == 15.0
-            assert loc.source == "macos_corelocation"
-            assert loc.is_fallback is False
+        with patch.object(service, "_try_native_swift_helper", return_value=None):
+            with patch.object(service, "_try_macos_corelocation", return_value=mock_loc):
+                loc = service.get_location()
+                assert loc.name == "Cupertino, CA"
+                assert loc.latitude == 37.3230
+                assert loc.accuracy_m == 15.0
+                assert loc.source == "macos_corelocation"
+                assert loc.is_fallback is False
+
+    def test_manual_configuration_validation_in_config(self) -> None:
+        from iris.core.config import _validate_coordinates
+
+        valid_lat, valid_lon = _validate_coordinates(45.0, 90.0)
+        assert valid_lat == 45.0
+        assert valid_lon == 90.0
+
+        bad_lat, bad_lon = _validate_coordinates(95.0, -190.0)
+        assert bad_lat is None
+        assert bad_lon is None
+
 
 
 # ── 2. TimezoneService Tests ──────────────────────────────────────────────────

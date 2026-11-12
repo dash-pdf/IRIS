@@ -9,11 +9,16 @@ Secrets are never logged or printed.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from iris.core.credentials import CredentialStore
+
+logger = logging.getLogger(__name__)
 
 
 def _load_env() -> None:
@@ -82,6 +87,18 @@ def _optional_float_or_none(key: str) -> float | None:
         return None
 
 
+def _validate_coordinates(lat: float | None, lon: float | None) -> tuple[float | None, float | None]:
+    valid_lat = lat
+    valid_lon = lon
+    if lat is not None and not (-90.0 <= lat <= 90.0):
+        logger.warning("Invalid latitude %s in configuration (must be between -90 and 90); ignoring.", lat)
+        valid_lat = None
+    if lon is not None and not (-180.0 <= lon <= 180.0):
+        logger.warning("Invalid longitude %s in configuration (must be between -180 and 180); ignoring.", lon)
+        valid_lon = None
+    return valid_lat, valid_lon
+
+
 @dataclass(frozen=True)
 class IRISConfig:
     """
@@ -146,19 +163,40 @@ class IRISConfig:
     persona_name: str = "IRIS"
 
 
-def load_config(require_voice: bool = True) -> IRISConfig:
+def load_config(
+    require_voice: bool = True,
+    credential_store: CredentialStore | None = None,
+) -> IRISConfig:
     """
-    Build and return an IRISConfig from the current environment.
+    Build and return an IRISConfig from OS secure storage (keyring) and .env fallback.
 
     Args:
         require_voice: If False, ElevenLabs keys are not required.
                        Useful for running offline tests.
+        credential_store: Optional CredentialStore override (primarily for tests).
     """
+    store = credential_store or CredentialStore(allow_env_fallback=False)
+
+    def _resolve_secret(key_name: str, *env_keys: str) -> str:
+        secret = store.get_secret(key_name)
+        if secret:
+            return secret
+        for env_key in env_keys:
+            val = _optional(env_key)
+            if val:
+                return val
+        return ""
+
+    elevenlabs_api_key = _resolve_secret("elevenlabs_api_key", "ELEVENLABS_API_KEY")
+    if require_voice and not elevenlabs_api_key:
+        raise EnvironmentError(
+            "Required credential 'ELEVENLABS_API_KEY' is not set in Keychain or .env. "
+            "Copy .env.example to .env or store 'elevenlabs_api_key' in OS keyring."
+        )
+
     if require_voice:
-        elevenlabs_api_key = _require("ELEVENLABS_API_KEY")
         elevenlabs_agent_id = _require("ELEVENLABS_AGENT_ID")
     else:
-        elevenlabs_api_key = _optional("ELEVENLABS_API_KEY")
         elevenlabs_agent_id = _optional("ELEVENLABS_AGENT_ID")
 
     llm_provider = _optional("IRIS_LLM_PROVIDER", "router").lower()
@@ -193,8 +231,8 @@ def load_config(require_voice: bool = True) -> IRISConfig:
     dev_str = _optional("IRIS_INPUT_DEVICE")
     input_dev = int(dev_str) if dev_str.isdigit() else None
 
-    openrouter_api_key = _optional("OPENROUTER_API_KEY")
-    google_api_key = _optional("GOOGLE_API_KEY") or _optional("GEMINI_API_KEY")
+    openrouter_api_key = _resolve_secret("openrouter_api_key", "OPENROUTER_API_KEY")
+    google_api_key = _resolve_secret("google_api_key", "GOOGLE_API_KEY", "GEMINI_API_KEY")
     ollama_host = _optional("IRIS_OLLAMA_HOST") or _optional("OLLAMA_HOST", "http://localhost:11434")
     ollama_keep_alive = _optional("IRIS_OLLAMA_KEEP_ALIVE", "30m")
 
@@ -217,9 +255,9 @@ def load_config(require_voice: bool = True) -> IRISConfig:
         ollama_host=ollama_host,
         ollama_keep_alive=ollama_keep_alive,
         openrouter_api_key=openrouter_api_key,
-        anthropic_api_key=_optional("ANTHROPIC_API_KEY"),
+        anthropic_api_key=_resolve_secret("anthropic_api_key", "ANTHROPIC_API_KEY"),
         google_api_key=google_api_key,
-        openai_api_key=_optional("OPENAI_API_KEY"),
+        openai_api_key=_resolve_secret("openai_api_key", "OPENAI_API_KEY"),
         llm_model_name=llm_model,
         tts_provider=_optional("IRIS_TTS_PROVIDER", "edge").lower(),
         macos_voice=_optional("IRIS_MACOS_VOICE", "Flo (English (UK))"),
@@ -235,11 +273,17 @@ def load_config(require_voice: bool = True) -> IRISConfig:
         echo_similarity_threshold=_optional_float("IRIS_ECHO_THRESHOLD", 0.70),
         archive_dir=archive_dir,
         enable_location_tracking=_optional_bool("IRIS_LOCATION_TRACKING", True),
-        fallback_location_name=_optional("IRIS_LOCATION_NAME", ""),
-        fallback_latitude=_optional_float_or_none("IRIS_LOCATION_LATITUDE"),
-        fallback_longitude=_optional_float_or_none("IRIS_LOCATION_LONGITUDE"),
+        fallback_location_name=_optional("IRIS_LOCATION_NAME") or _optional("IRIS_FALLBACK_LOCATION_NAME", ""),
+        fallback_latitude=_validate_coordinates(
+            _optional_float_or_none("IRIS_LATITUDE") or _optional_float_or_none("IRIS_LOCATION_LATITUDE") or _optional_float_or_none("IRIS_FALLBACK_LATITUDE"),
+            _optional_float_or_none("IRIS_LONGITUDE") or _optional_float_or_none("IRIS_LOCATION_LONGITUDE") or _optional_float_or_none("IRIS_FALLBACK_LONGITUDE"),
+        )[0],
+        fallback_longitude=_validate_coordinates(
+            _optional_float_or_none("IRIS_LATITUDE") or _optional_float_or_none("IRIS_LOCATION_LATITUDE") or _optional_float_or_none("IRIS_FALLBACK_LATITUDE"),
+            _optional_float_or_none("IRIS_LONGITUDE") or _optional_float_or_none("IRIS_LOCATION_LONGITUDE") or _optional_float_or_none("IRIS_FALLBACK_LONGITUDE"),
+        )[1],
         weather_provider=_optional("IRIS_WEATHER_PROVIDER", "open-meteo").lower(),
-        weather_api_key=_optional("IRIS_WEATHER_API_KEY", ""),
+        weather_api_key=_resolve_secret("weather_api_key", "IRIS_WEATHER_API_KEY"),
         apple_weather_team_id=_optional("APPLE_WEATHER_TEAM_ID"),
         apple_weather_key_id=_optional("APPLE_WEATHER_KEY_ID"),
         apple_weather_service_id=_optional("APPLE_WEATHER_SERVICE_ID"),

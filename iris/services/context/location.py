@@ -3,9 +3,9 @@ iris/services/context/location.py
 ----------------------------------
 Physical device location service for IRIS.
 
-Prioritizes native macOS CoreLocation via lightweight ctypes Objective-C bindings,
-with robust fallbacks to persistent disk cache, manual user configuration,
-and timezone-based heuristics.
+Prioritizes native macOS CoreLocation via a dedicated Swift application bundle
+(IrisLocationHelper.app) and native ctypes Objective-C bindings, with robust
+fallbacks to persistent disk cache, manual user configuration, and timezone heuristics.
 
 Privacy Guarantee:
 Exact latitude and longitude coordinates are NEVER logged. Only city/region names
@@ -18,7 +18,9 @@ import ctypes
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -59,7 +61,7 @@ class CLLocationCoordinate2D(ctypes.Structure):
 
 class LocationService:
     """
-    Detects physical device location via macOS CoreLocation, with
+    Detects physical device location via native macOS CoreLocation, with
     graceful fallback to local cache, manual configuration, and timezone defaults.
     """
 
@@ -70,6 +72,7 @@ class LocationService:
         fallback_name: str = "",
         fallback_latitude: float | None = None,
         fallback_longitude: float | None = None,
+        helper_path: Path | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_file = self.cache_dir / "location_cache.json"
@@ -78,78 +81,180 @@ class LocationService:
         self.fallback_latitude = fallback_latitude
         self.fallback_longitude = fallback_longitude
         self._cached_location: LocationInfo | None = None
+        self._permission_denied: bool = False
+        self._lock = threading.Lock()
 
-        # Pre-load cache if available
+        # Locate IrisLocationHelper bundle binary
+        if helper_path is not None:
+            self.helper_path = Path(helper_path)
+        else:
+            # Standard location: <project_root>/bin/IrisLocationHelper.app/Contents/MacOS/IrisLocationHelper
+            project_root = Path(__file__).resolve().parent.parent.parent.parent
+            self.helper_path = (
+                project_root
+                / "bin"
+                / "IrisLocationHelper.app"
+                / "Contents"
+                / "MacOS"
+                / "IrisLocationHelper"
+            )
+
+        # Pre-load cache if available (only authentic, non-fallback locations)
         self._cached_location = self._load_cache()
 
     def get_location(self, force_refresh: bool = False) -> LocationInfo:
         """
         Determine device location using the fallback hierarchy:
-        1. macOS CoreLocation (if tracking enabled on macOS)
-        2. Local disk cache (location_cache.json)
-        3. Manual configuration fallback (IRISConfig)
-        4. Timezone-based heuristic fallback
-        5. Generic 'Local Device' fallback
+        1. In-memory genuine cache (if not force_refresh and not is_fallback)
+        2. Native macOS Swift helper (IrisLocationHelper.app with Info.plist & CoreLocation)
+        3. Native macOS CoreLocation ctypes fallback
+        4. Local disk cache (location_cache.json, authentic only)
+        5. Manual configuration fallback (IRIS_LOCATION_NAME, IRIS_LATITUDE, IRIS_LONGITUDE)
+        6. Timezone-based heuristic fallback
+        7. Generic 'Local Device' fallback
         """
-        if self._cached_location and not force_refresh and self._cached_location.latitude is not None:
-            return self._cached_location
+        with self._lock:
+            if (
+                self._cached_location
+                and not force_refresh
+                and not self._cached_location.is_fallback
+                and self._cached_location.latitude is not None
+            ):
+                return self._cached_location
 
-        if self.enable_tracking and sys.platform == "darwin":
-            detected = self._try_macos_corelocation()
-            if detected is not None:
-                self._save_cache(detected)
-                self._cached_location = detected
-                return detected
+            # 1. Native macOS CoreLocation via Swift Helper / ctypes
+            if self.enable_tracking and sys.platform == "darwin" and not self._permission_denied:
+                # Primary: Native Swift App Bundle Helper
+                detected = self._try_native_swift_helper()
+                if detected is not None:
+                    self._save_cache(detected)
+                    self._cached_location = detected
+                    return detected
 
-        # Fallback 1: Local persistent cache from prior runs
-        cached = self._load_cache()
-        if cached is not None and cached.latitude is not None:
-            logger.info("Using cached location: '%s' (source: %s)", cached.name, cached.source)
-            self._cached_location = cached
-            return cached
+                # Secondary: Direct ctypes CoreLocation bridge
+                detected = self._try_macos_corelocation()
+                if detected is not None:
+                    self._save_cache(detected)
+                    self._cached_location = detected
+                    return detected
 
-        # Fallback 2: Manual configuration
-        if self.fallback_name or (self.fallback_latitude is not None and self.fallback_longitude is not None):
-            logger.info("Using configured manual fallback location: '%s'", self.fallback_name or "Custom Coordinates")
-            manual = LocationInfo(
-                name=self.fallback_name or "Manual Location",
-                latitude=self.fallback_latitude,
-                longitude=self.fallback_longitude,
-                source="manual_fallback",
+            # 2. Local persistent cache from prior authentic runs
+            cached = self._load_cache()
+            if cached is not None and not cached.is_fallback and cached.latitude is not None:
+                logger.info("Using cached location: '%s' (source: %s)", cached.name, cached.source)
+                self._cached_location = cached
+                return cached
+
+            # 3. Manual configuration fallback (Approach C)
+            if self.fallback_name or (
+                self.fallback_latitude is not None and self.fallback_longitude is not None
+            ):
+                logger.info(
+                    "Using configured manual fallback location: '%s'",
+                    self.fallback_name or "Custom Coordinates",
+                )
+                manual = LocationInfo(
+                    name=self.fallback_name or "Manual Location",
+                    latitude=self.fallback_latitude,
+                    longitude=self.fallback_longitude,
+                    source="manual_config",
+                    is_fallback=True,
+                )
+                self._cached_location = manual
+                return manual
+
+            # 4. Timezone-based heuristic fallback (Never saved to persistent cache)
+            tz_fallback = self._heuristic_from_timezone()
+            if tz_fallback is not None:
+                logger.info("Using timezone-derived location fallback: '%s'", tz_fallback.name)
+                self._cached_location = tz_fallback
+                return tz_fallback
+
+            # 5. Generic unknown device fallback
+            logger.info("No location available; defaulting to generic Local Device")
+            generic = LocationInfo(
+                name="Local Device",
+                latitude=None,
+                longitude=None,
+                source="unknown",
                 is_fallback=True,
             )
-            self._save_cache(manual)
-            self._cached_location = manual
-            return manual
+            self._cached_location = generic
+            return generic
 
-        # Fallback 3: Timezone-based heuristic
-        tz_fallback = self._heuristic_from_timezone()
-        if tz_fallback is not None:
-            logger.info("Using timezone-derived location: '%s'", tz_fallback.name)
-            self._save_cache(tz_fallback)
-            self._cached_location = tz_fallback
-            return tz_fallback
+    def _try_native_swift_helper(self, timeout_s: float = 10.0) -> LocationInfo | None:
+        """
+        Execute native Swift IrisLocationHelper.app bundle.
+        Triggers macOS TCC permission prompt if NotDetermined, returns coordinates on success.
+        """
+        if not self.helper_path.is_file() or not os.access(self.helper_path, os.X_OK):
+            logger.debug("Native location helper not found or not executable at: %s", self.helper_path)
+            return None
 
-        # Fallback 4: Generic unknown device
-        logger.info("No location available; defaulting to generic Local Device")
-        generic = LocationInfo(
-            name="Local Device",
-            latitude=None,
-            longitude=None,
-            source="unknown",
-            is_fallback=True,
-        )
-        self._cached_location = generic
-        return generic
+        try:
+            cmd = [str(self.helper_path), str(timeout_s)]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s + 2.0,
+            )
+            stdout = proc.stdout.strip()
+            if not stdout:
+                logger.debug("Native location helper returned empty output (exit=%d)", proc.returncode)
+                return None
+
+            data = json.loads(stdout)
+            status = data.get("status")
+
+            if status == "success":
+                lat = data.get("latitude")
+                lon = data.get("longitude")
+                accuracy = data.get("accuracy_m")
+                city = data.get("city") or self._guess_city_name(lat, lon) or "Local Device"
+
+                if lat is not None and lon is not None and (-90.0 <= lat <= 90.0) and (-180.0 <= lon <= 180.0):
+                    logger.info("macOS native location acquired for '%s' (accuracy: %.1fm)", city, accuracy or 0.0)
+                    return LocationInfo(
+                        name=city,
+                        latitude=lat,
+                        longitude=lon,
+                        accuracy_m=accuracy,
+                        source="macos_native",
+                        is_fallback=False,
+                    )
+
+            elif status in ("denied", "restricted"):
+                self._permission_denied = True
+                logger.info(
+                    "macOS Location Services permission was denied or restricted. "
+                    "To enable automatic location, allow Location Services in System Settings -> "
+                    "Privacy & Security -> Location Services -> IRIS Location Helper."
+                )
+            elif status == "services_disabled":
+                logger.info(
+                    "macOS Location Services are disabled globally. "
+                    "Enable via System Settings -> Privacy & Security -> Location Services."
+                )
+            elif status == "timeout":
+                logger.debug("macOS native location request timed out.")
+            else:
+                logger.debug("macOS native location helper status: %s (error: %s)", status, data.get("error"))
+
+        except subprocess.TimeoutExpired:
+            logger.debug("macOS native location helper subprocess timed out after %.1fs", timeout_s)
+        except Exception as exc:
+            logger.debug("Failed to execute native location helper: %s", exc)
+
+        return None
 
     def _try_macos_corelocation(self) -> LocationInfo | None:
         """
-        Attempt to query location via macOS CoreLocation using ctypes.
-        Returns LocationInfo on success, or None on failure or missing permissions.
+        Secondary fallback: Query location via ctypes Objective-C bindings.
         """
         try:
             objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
-            cl_lib = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreLocation.framework/CoreLocation")
+            ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreLocation.framework/CoreLocation")
         except Exception as exc:
             logger.debug("CoreLocation ctypes load skipped: %s", exc)
             return None
@@ -168,6 +273,7 @@ class LocationService:
             sel_init = objc.sel_registerName(b"init")
             sel_services_enabled = objc.sel_registerName(b"locationServicesEnabled")
             sel_auth_status = objc.sel_registerName(b"authorizationStatus")
+            sel_req_when_in_use = objc.sel_registerName(b"requestWhenInUseAuthorization")
             sel_location = objc.sel_registerName(b"location")
             sel_start_updates = objc.sel_registerName(b"startUpdatingLocation")
             sel_stop_updates = objc.sel_registerName(b"stopUpdatingLocation")
@@ -195,22 +301,18 @@ class LocationService:
             status = objc.objc_msgSend(mgr, sel_auth_status)
 
             if status == CL_AUTH_NOT_DETERMINED:
-                logger.info(
-                    "macOS Location Services authorization status is NotDetermined (0). "
-                    "To enable automatic location detection on macOS, ensure Location Services "
-                    "is allowed under System Settings -> Privacy & Security -> Location Services "
-                    "for your Terminal / Python process."
-                )
-                return None
+                # Request authorization instead of returning immediately
+                objc.objc_msgSend.restype = None
+                objc.objc_msgSend(mgr, sel_req_when_in_use)
+                # Re-check status
+                objc.objc_msgSend.restype = ctypes.c_int
+                status = objc.objc_msgSend(mgr, sel_auth_status)
+                if status == CL_AUTH_NOT_DETERMINED:
+                    return None
             elif status in (CL_AUTH_RESTRICTED, CL_AUTH_DENIED):
-                logger.info(
-                    "macOS Location Services authorization is restricted or denied (status=%d). "
-                    "Using configured fallback or cached location.",
-                    status,
-                )
+                self._permission_denied = True
                 return None
             elif status not in (CL_AUTH_AUTHORIZED_ALWAYS, CL_AUTH_AUTHORIZED_WHEN_IN_USE):
-                logger.debug("Unknown macOS CoreLocation auth status: %d", status)
                 return None
 
             # Authorized! Request location update
@@ -228,13 +330,9 @@ class LocationService:
             objc.objc_msgSend(mgr, sel_stop_updates)
 
             if not loc_ptr:
-                logger.debug("CoreLocation returned null location pointer")
                 return None
 
             # Extract coordinates
-            # coordinate method returns CLLocationCoordinate2D struct
-            # On arm64 and x86_64, msgSend_stret or direct msgSend is architecture-dependent.
-            # Using ctypes prototype for objc_msgSend with struct return:
             msg_send_coord = ctypes.cast(
                 objc.objc_msgSend,
                 ctypes.CFUNCTYPE(CLLocationCoordinate2D, ctypes.c_void_p, ctypes.c_void_p),
@@ -255,7 +353,7 @@ class LocationService:
                 return None
 
             city_name = self.fallback_name or self._guess_city_name(lat, lon) or "Local Device"
-            logger.info("macOS CoreLocation acquired successfully for '%s' (accuracy: %.1fm)", city_name, accuracy)
+            logger.info("macOS CoreLocation acquired for '%s' (accuracy: %.1fm)", city_name, accuracy)
 
             return LocationInfo(
                 name=city_name,
@@ -279,8 +377,8 @@ class LocationService:
                 best_dist = dist
                 best_name = city
 
-        # If within ~1 degree (~110km) of a known city center
-        if best_dist < 1.0:
+        # If within ~1.5 degree (~165km) of a known city center
+        if best_dist < 2.25:
             return best_name
         return "Local Device"
 
@@ -305,13 +403,17 @@ class LocationService:
         return None
 
     def _load_cache(self) -> LocationInfo | None:
-        """Read cached location from disk."""
+        """Read cached location from disk. Ignores fallbacks."""
         if not self.cache_file.exists():
             return None
         try:
             content = self.cache_file.read_text(encoding="utf-8")
             data = json.loads(content)
             loc = LocationInfo.from_dict(data)
+            # Never load a fallback location from cache as an authentic location
+            if loc.is_fallback:
+                logger.debug("Ignoring disk cache from %s because it is marked as a fallback", self.cache_file)
+                return None
             loc.source = "cached"
             return loc
         except Exception as exc:
@@ -319,7 +421,11 @@ class LocationService:
             return None
 
     def _save_cache(self, location: LocationInfo) -> None:
-        """Persist location to disk cache."""
+        """Persist authentic physical location to disk cache. Never saves fallbacks."""
+        if location.is_fallback:
+            logger.debug("Skipping disk cache persistence for fallback location '%s'", location.name)
+            return
+
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             payload = location.to_dict(include_coordinates=True)

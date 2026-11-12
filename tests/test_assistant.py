@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -66,14 +66,14 @@ class TestIRISAssistant:
     def test_text_turn_execution_and_archiving(
         self, mock_assistant: IRISAssistant, temp_archive_dir: Path
     ) -> None:
-        mock_assistant.start()
+        with patch.object(mock_assistant, "_on_audio_frame"):
+            mock_assistant.start()
+            resp = mock_assistant.process_text_turn("Status check please.")
+            assert resp == "I am IRIS, all systems nominal."
 
-        resp = mock_assistant.process_text_turn("Status check please.")
-        assert resp == "I am IRIS, all systems nominal."
-
-        # Wait for brief cooldown to return to IDLE
-        time.sleep(0.1)
-        assert mock_assistant.current_state == AudioState.IDLE
+            # Wait for brief cooldown to return to IDLE
+            time.sleep(0.1)
+            assert mock_assistant.current_state == AudioState.IDLE
 
         mock_assistant.stop()
 

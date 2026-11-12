@@ -5,7 +5,18 @@
 *.env
 *.key
 *.pem
+*.p8
 secrets/
+credentials.json
+token.json
+client_secret*.json
+
+# ── Local Compiled Helpers & Databases ──────────────────────────────
+bin/
+*.db
+*.sqlite
+*.sqlite3
+memory/index/
 
 # ── Python Virtual Environments & Packages ─────────────────────────
 .venv/

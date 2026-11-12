@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from iris.adapters.model.base import ModelAdapter
+from iris.core.security import sanitize_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +175,9 @@ class OpenRouterModelAdapter(ModelAdapter):
         except RuntimeError:
             raise
         except Exception as exc:
+            safe_exc = sanitize_sensitive_text(str(exc))
             err_msg = (
-                f"OpenRouter generation error: {exc}. "
+                f"OpenRouter generation error: {safe_exc}. "
                 "Halting without fallback."
             )
             logger.error(err_msg)
